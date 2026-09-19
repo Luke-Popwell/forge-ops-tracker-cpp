@@ -7,7 +7,7 @@ namespace forge_ops_tracker {
 
 namespace {
 
-// scheme://[userinfo@]host[:port][/path] -- matches the same shape every other SDK's own DSN
+// scheme://[userinfo@]host[:port][/path]: matches the same shape every other SDK's own DSN
 // parser in this repo handles, via std::regex (standard library, no extra dependency) rather than
 // a general-purpose URI parser: a DSN's shape is simple and fixed enough that this covers it
 // completely.
@@ -76,6 +76,51 @@ std::optional<std::string> Configuration::ingestion_uri() const {
         return std::nullopt;
     }
     return parsed->ingestion_uri;
+}
+
+std::optional<std::string> Configuration::performance_samples_uri() const {
+    auto uri = ingestion_uri();
+    if (!uri) {
+        return std::nullopt;
+    }
+    static const std::string suffix = "/events";
+    if (uri->size() >= suffix.size() && uri->compare(uri->size() - suffix.size(), suffix.size(), suffix) == 0) {
+        return uri->substr(0, uri->size() - suffix.size()) + "/performance_samples";
+    }
+    return uri;
+}
+
+namespace {
+std::optional<std::string> swap_events_suffix(const std::optional<std::string>& uri, const std::string& replacement) {
+    if (!uri) {
+        return std::nullopt;
+    }
+    static const std::string suffix = "/events";
+    if (uri->size() >= suffix.size() && uri->compare(uri->size() - suffix.size(), suffix.size(), suffix) == 0) {
+        return uri->substr(0, uri->size() - suffix.size()) + replacement;
+    }
+    return uri;
+}
+} // namespace
+
+std::optional<std::string> Configuration::custom_metrics_uri() const {
+    return swap_events_suffix(ingestion_uri(), "/custom_metrics");
+}
+
+std::optional<std::string> Configuration::infrastructure_metrics_uri() const {
+    return swap_events_suffix(ingestion_uri(), "/infrastructure_metrics");
+}
+
+std::optional<std::string> Configuration::spans_uri() const {
+    auto uri = ingestion_uri();
+    if (!uri) {
+        return std::nullopt;
+    }
+    static const std::string suffix = "/events";
+    if (uri->size() >= suffix.size() && uri->compare(uri->size() - suffix.size(), suffix.size(), suffix) == 0) {
+        return uri->substr(0, uri->size() - suffix.size()) + "/spans";
+    }
+    return uri;
 }
 
 bool Configuration::is_enabled() const {

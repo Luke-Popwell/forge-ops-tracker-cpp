@@ -5,7 +5,7 @@
 namespace forge_ops_tracker {
 
 namespace {
-// libcurl calls this to hand over the response body -- this client doesn't need it (only the
+// libcurl calls this to hand over the response body: this client doesn't need it (only the
 // status code matters, checked via CURLINFO_RESPONSE_CODE below), but a write callback must be
 // set to something other than curl's own default (which writes to stdout) or a successful
 // response would otherwise print its body to the host app's console.
@@ -17,7 +17,26 @@ std::size_t discard_response_body(char*, std::size_t size, std::size_t nmemb, vo
 Client::Client(const Configuration& configuration) : configuration_(configuration) {}
 
 bool Client::deliver(const nlohmann::json& payload) const {
-    auto uri = configuration_.ingestion_uri();
+    return post(configuration_.ingestion_uri(), payload);
+}
+
+bool Client::deliver_performance_samples(const nlohmann::json& samples) const {
+    return post(configuration_.performance_samples_uri(), nlohmann::json{{"samples", samples}});
+}
+
+bool Client::deliver_metrics(const nlohmann::json& entries) const {
+    return post(configuration_.custom_metrics_uri(), nlohmann::json{{"metrics", entries}});
+}
+
+bool Client::deliver_infrastructure_metrics(const nlohmann::json& entries) const {
+    return post(configuration_.infrastructure_metrics_uri(), nlohmann::json{{"metrics", entries}});
+}
+
+bool Client::deliver_spans(const nlohmann::json& trace) const {
+    return post(configuration_.spans_uri(), trace);
+}
+
+bool Client::post(const std::optional<std::string>& uri, const nlohmann::json& payload) const {
     auto api_key = configuration_.api_key();
     if (!uri || !api_key) {
         return false;
@@ -42,7 +61,7 @@ bool Client::deliver(const nlohmann::json& payload) const {
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(configuration_.timeout_seconds));
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discard_response_body);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L); // safe to use from a background thread -- see DeliveryQueue
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L); // safe to use from a background thread: see DeliveryQueue
 
     CURLcode result = curl_easy_perform(curl);
 

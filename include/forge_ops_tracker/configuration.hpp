@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <functional>
 #include <optional>
 #include <set>
@@ -9,7 +10,7 @@ namespace forge_ops_tracker {
 
 /**
  * Holds a single ForgeOps DSN plus everything else the client needs to build and deliver events.
- * Mirrors gems/forge_ops_tracker/lib/forge_ops_tracker/configuration.rb -- a single DSN string
+ * Mirrors gems/forge_ops_tracker/lib/forge_ops_tracker/configuration.rb: a single DSN string
  * carries both the ingestion URL and the project's api_key:
  * "https://<api_key>@host/api/v1/events".
  */
@@ -22,7 +23,7 @@ public:
 
     /**
      * Used to decide whether a backtrace frame is "in_app": a frame's file compared against this
-     * root. Defaults empty (meaning: never in_app) -- set explicitly to your app's own source
+     * root. Defaults empty (meaning: never in_app): set explicitly to your app's own source
      * root, the same way the Ruby/Python/Node clients default to a real value (Rails.root,
      * process.cwd()) but this one can't guess a meaningful default the way an interpreted
      * language's own runtime can.
@@ -41,11 +42,49 @@ public:
      * source code somewhere it shouldn't go: ForgeOps' own per-project setting is the durable,
      * server-enforced off switch, since it applies regardless of what this flag happens to be set
      * to on any given deployment. Kept here purely for API-shape consistency across every SDK in
-     * this repo -- see EventBuilder's own header comment for why this specific client's capture
+     * this repo: see EventBuilder's own header comment for why this specific client's capture
      * function is a documented no-op regardless of this value: backtrace_symbols() never produces
      * a real file+line pair to read in the first place.
      */
     bool capture_source_context = true;
+
+    /** Whether add_breadcrumb records anything at all. On by default, matching every other client in this repo. */
+    bool track_breadcrumbs = true;
+
+    /** How many of the most recent breadcrumbs are kept, oldest dropped first. 30, matching every other client's default. */
+    std::size_t max_breadcrumbs = 30;
+
+    /**
+     * Whether record_performance/time_transaction time anything at all. On by default, the same
+     * "on unless you turn it off" posture error reporting itself already has. This client has no
+     * web framework integration, so nothing is timed automatically: this only gates the manual API.
+     */
+    bool track_performance = true;
+
+    /**
+     * How often the in-process tallies are flushed as one small aggregate report, rather than one
+     * network call per timed call. Matches gems/forge_ops_tracker's own default (60s).
+     */
+    std::chrono::milliseconds performance_flush_interval{60000};
+
+    /**
+     * Whether trace/ScopedTrace start a trace at all, and so whether spans are recorded and slow
+     * traces sent. On by default. This client has no web framework integration, so nothing starts a
+     * trace automatically: this gates the manual API.
+     */
+    bool track_tracing = true;
+
+    /**
+     * How often the buffered capture_metric / capture_infrastructure_metric entries are flushed as one
+     * batch (60s by default). There is no track_metrics flag the way track_performance has one: these
+     * are explicit calls the host app's own code makes, not automatic instrumentation, so there is
+     * nothing to turn off that simply not calling them doesn't already do.
+     */
+    std::chrono::milliseconds metric_flush_interval{60000};
+    std::chrono::milliseconds infrastructure_metric_flush_interval{60000};
+
+    /** A trace is only sent when its root span took at least this long. 1 second by default. */
+    std::chrono::milliseconds trace_capture_threshold{1000};
 
     std::function<void(const std::string&)> logger;
 
@@ -53,6 +92,20 @@ public:
 
     /** The ingestion URL with credentials stripped out (they travel as the Authorization header instead). */
     std::optional<std::string> ingestion_uri() const;
+
+    /**
+     * Same derivation as ingestion_uri(), with the trailing "/events" swapped for
+     * "/performance_samples": one DSN, two endpoints, matching the Ruby gem's own
+     * Configuration#performance_samples_uri.
+     */
+    std::optional<std::string> performance_samples_uri() const;
+
+    /** Same derivation again, swapping the trailing "/events" for "/custom_metrics" and "/infrastructure_metrics". */
+    std::optional<std::string> custom_metrics_uri() const;
+    std::optional<std::string> infrastructure_metrics_uri() const;
+
+    /** Same derivation again, swapping the trailing "/events" for "/spans". */
+    std::optional<std::string> spans_uri() const;
 
     bool is_enabled() const;
 

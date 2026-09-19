@@ -31,7 +31,7 @@ struct Pattern {
 };
 
 // std::regex's default ECMAScript grammar accepts every one of these 8 patterns unmodified from
-// app/services/pii_scrubber.rb's own Ruby syntax -- verified directly against real matching
+// app/services/pii_scrubber.rb's own Ruby syntax: verified directly against real matching
 // input for each (see test_pii_scrubber.cpp), not assumed to translate cleanly just because the
 // syntax looks the same.
 const std::vector<Pattern>& patterns() {

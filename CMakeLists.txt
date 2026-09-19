@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(forge_ops_tracker CXX)
 
-set(CMAKE_CXX_STANDARD 17) # the headers already use std::optional throughout (Configuration, event_builder's own overloads) -- C++17 is the real floor, not a rounder-sounding default
+set(CMAKE_CXX_STANDARD 17) # the headers already use std::optional throughout (Configuration, event_builder's own overloads): C++17 is the real floor, not a rounder-sounding default
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(CURL REQUIRED)
@@ -9,7 +9,7 @@ find_package(Threads REQUIRED) # DeliveryQueue's background std::thread
 
 # nlohmann/json is a real, header-only third-party dependency this client already reaches for
 # throughout its own headers (event_builder.hpp, client.hpp, delivery_queue.hpp, reporter.hpp,
-# pii_scrubber.hpp all include <nlohmann/json.hpp> directly) -- unlike sdks/c, sdks/rust, and
+# pii_scrubber.hpp all include <nlohmann/json.hpp> directly): unlike sdks/c, sdks/rust, and
 # sdks/go, this SDK's JSON encoding was never hand-rolled to begin with. That's an existing design
 # decision baked into the source this round inherited, not something introduced here; see the
 # README's own "Dependencies" section for the full reasoning on why it was kept rather than ripped
@@ -34,6 +34,10 @@ add_library(forge_ops_tracker
     src/delivery_queue.cpp
     src/client.cpp
     src/reporter.cpp
+    src/performance_flusher.cpp
+    src/span_buffer.cpp
+    src/metric_buffer.cpp
+    src/span_queue.cpp
     src/forge_ops_tracker.cpp
 )
 target_include_directories(forge_ops_tracker PUBLIC include)
@@ -43,13 +47,13 @@ target_include_directories(forge_ops_tracker PUBLIC include)
 target_link_libraries(forge_ops_tracker PUBLIC CURL::libcurl nlohmann_json::nlohmann_json)
 target_link_libraries(forge_ops_tracker PRIVATE Threads::Threads)
 
-# Real (not stub) backtrace symbol resolution needs frame pointers and debug info -- without
+# Real (not stub) backtrace symbol resolution needs frame pointers and debug info: without
 # -fno-omit-frame-pointer, backtrace() can silently return far fewer/wrong frames under
 # optimization, which would make event_builder's own tests flaky depending on build type. Same
 # reasoning as sdks/c's own CMakeLists.txt.
 target_compile_options(forge_ops_tracker PRIVATE -g -fno-omit-frame-pointer -Wall -Wextra)
 
-# No extra link flag needed for _NSGetExecutablePath on Apple platforms (part of libSystem) --
+# No extra link flag needed for _NSGetExecutablePath on Apple platforms (part of libSystem):
 # event_builder.cpp's own #if defined(__APPLE__) branch is what actually gates that code, not
 # anything here.
 

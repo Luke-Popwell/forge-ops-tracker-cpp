@@ -15,9 +15,9 @@ namespace forge_ops_tracker {
 /**
  * A small bounded queue drained by a background std::thread, so delivery never blocks the caller
  * that raised the error. The closest real equivalent to the Ruby/Java clients' own
- * background-thread DeliveryQueue -- see gems/forge_ops_tracker/lib/forge_ops_tracker/delivery_queue.rb.
+ * background-thread DeliveryQueue: see gems/forge_ops_tracker/lib/forge_ops_tracker/delivery_queue.rb.
  * Bounded via `queue_size`; push() never blocks, drops and logs when full. The worker thread is
- * started lazily, on first push, not at construction -- not for a fork-safety reason the way
+ * started lazily, on first push, not at construction: not for a fork-safety reason the way
  * Ruby/Python/Node's own lazy start is (a C++ binary doesn't have an interpreter-level module
  * load moment a prefork server could fork after), but simply so a Reporter that's constructed but
  * never actually used to report anything never spins up a thread it doesn't need.

@@ -8,12 +8,12 @@
 namespace forge_ops_tracker {
 
 /**
- * Redacts likely-sensitive content out of a payload before it ever leaves this process -- the
+ * Redacts likely-sensitive content out of a payload before it ever leaves this process: the
  * same patterns ForgeOps itself applies again on arrival (defense in depth: this layer keeps the
  * data off the wire; the server-side layer is what actually protects the database). Ported from
- * app/services/pii_scrubber.rb -- same key list, same 8 regex patterns, same "[LABEL FILTERED]"
+ * app/services/pii_scrubber.rb: same key list, same 8 regex patterns, same "[LABEL FILTERED]"
  * replacement format, same REDACTED constant. Deliberately does NOT support
- * Project#additional_sensitive_keys -- confirmed server-side only (see that file's own header
+ * Project#additional_sensitive_keys: confirmed server-side only (see that file's own header
  * comment: extending the pattern list to arbitrary customer regexes is a ReDoS risk best kept out
  * of every client).
  */
