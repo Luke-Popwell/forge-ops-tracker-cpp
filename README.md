@@ -82,7 +82,7 @@ before calling `init`:
 #include <forge_ops_tracker/forge_ops_tracker.hpp>
 
 forge_ops_tracker::init([](forge_ops_tracker::Configuration& config) {
-    config.dsn = "https://<api_key>@your-forgeops-host/api/v1/events";
+    config.dsn = "https://<api_key>@getforgeops.net/api/v1/events";
     config.environment = "production";
     config.release = "1.4.2";
     config.app_root = "/opt/myapp"; // used for in_app backtrace classification, see below
