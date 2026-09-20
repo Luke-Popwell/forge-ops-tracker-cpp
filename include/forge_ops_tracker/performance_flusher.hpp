@@ -78,6 +78,8 @@ private:
         unsigned long count = 0;
         double duration_sum_ms = 0;
         double max_duration_ms = 0;
+        /* A count per latency bucket label, see histogram_bucketer.hpp. */
+        std::map<std::string, unsigned long> histogram;
     };
 
     const Configuration& configuration_;

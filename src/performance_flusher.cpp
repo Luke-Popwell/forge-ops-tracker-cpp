@@ -5,6 +5,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "forge_ops_tracker/histogram_bucketer.hpp"
+
 namespace forge_ops_tracker {
 
 namespace {
@@ -54,6 +56,9 @@ void PerformanceFlusher::record(const std::string& transaction_name, double dura
         if (duration_ms > bucket.max_duration_ms) {
             bucket.max_duration_ms = duration_ms;
         }
+        // The distribution count/sum/max can't reconstruct: see histogram_bucketer.hpp for why the
+        // server approximates a percentile from these bucket counts.
+        bucket.histogram[histogram_bucket_for(duration_ms)]++;
     }
     ensure_worker_started();
 }
@@ -89,6 +94,7 @@ void PerformanceFlusher::flush() {
             {"request_count", bucket.count},
             {"duration_sum_ms", bucket.duration_sum_ms},
             {"max_duration_ms", bucket.max_duration_ms},
+            {"histogram", bucket.histogram},
         });
     }
 
@@ -105,6 +111,17 @@ void PerformanceFlusher::flush() {
         Bucket& current = it->second;
         current.count = current.count > sent.count ? current.count - sent.count : 0;
         current.duration_sum_ms = std::max(0.0, current.duration_sum_ms - sent.duration_sum_ms);
+        for (const auto& [label, sent_count] : sent.histogram) {
+            auto label_it = current.histogram.find(label);
+            if (label_it == current.histogram.end()) {
+                continue;
+            }
+            if (label_it->second > sent_count) {
+                label_it->second -= sent_count;
+            } else {
+                current.histogram.erase(label_it);
+            }
+        }
         // max_duration_ms is deliberately left as whatever is currently on the bucket, sent or not:
         // unlike count/duration_sum_ms, a max can't be correctly "subtracted" back out (the true
         // max of what's left is anything at or below it, not knowable from the two numbers alone),

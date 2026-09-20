@@ -36,6 +36,7 @@
 #include "forge_ops_tracker/event_builder.hpp"
 #include "forge_ops_tracker/forge_ops_tracker.hpp"
 #include "forge_ops_tracker/metric_buffer.hpp"
+#include "forge_ops_tracker/histogram_bucketer.hpp"
 #include "forge_ops_tracker/performance_flusher.hpp"
 #include "forge_ops_tracker/pii_scrubber.hpp"
 #include "forge_ops_tracker/reporter.hpp"
@@ -1161,6 +1162,95 @@ TEST(performance_a_record_that_lands_during_delivery_is_never_lost) {
     flusher.discard();
 }
 
+TEST(histogram_bucket_for_returns_the_smallest_boundary_a_duration_fits_under_as_a_string) {
+    ASSERT_TRUE(forge_ops_tracker::histogram_bucket_for(10) == "50");
+    ASSERT_TRUE(forge_ops_tracker::histogram_bucket_for(50) == "50");
+    ASSERT_TRUE(forge_ops_tracker::histogram_bucket_for(50.5) == "100");
+    ASSERT_TRUE(forge_ops_tracker::histogram_bucket_for(4999) == "5000");
+}
+
+TEST(histogram_bucket_for_returns_inf_for_anything_larger_than_the_largest_boundary) {
+    ASSERT_TRUE(forge_ops_tracker::histogram_bucket_for(10001) == "inf");
+    ASSERT_TRUE(forge_ops_tracker::histogram_bucket_for(1000000) == "inf");
+}
+
+TEST(histogram_bucket_for_puts_a_duration_exactly_on_a_boundary_into_that_boundarys_own_bucket) {
+    for (unsigned long boundary : forge_ops_tracker::kHistogramBoundariesMs) {
+        ASSERT_TRUE(forge_ops_tracker::histogram_bucket_for(static_cast<double>(boundary)) == std::to_string(boundary));
+    }
+}
+
+TEST(histogram_boundaries_match_the_servers_histogram_percentile) {
+    /* app/services/histogram_percentile.rb and every other SDK must agree on this exact list. */
+    const std::array<unsigned long, 8> expected = {50, 100, 250, 500, 1000, 2500, 5000, 10000};
+    ASSERT_TRUE(forge_ops_tracker::kHistogramBoundariesMs == expected);
+}
+
+TEST(performance_flush_delivers_a_latency_histogram_alongside_count_sum_and_max) {
+    TestServer server(202);
+    Configuration config = performance_configuration(server.port());
+    forge_ops_tracker::PerformanceFlusher flusher(config, Client(config));
+    for (double duration : {10.0, 40.0, 120.0, 700.0, 12000.0}) {
+        flusher.record("GET /posts", duration);
+    }
+
+    flusher.flush();
+
+    ASSERT_TRUE(server.wait_for_request_count(1));
+    const auto sample = nlohmann::json::parse(request_body(server))["samples"][0];
+    ASSERT_TRUE(sample["histogram"] == (nlohmann::json{{"50", 2}, {"250", 1}, {"1000", 1}, {"inf", 1}}));
+    ASSERT_TRUE(sample["request_count"] == 5);
+    flusher.discard();
+}
+
+TEST(performance_a_failed_delivery_keeps_histogram_counts_for_the_next_flush) {
+    TestServer failing(500);
+    TestServer working(202);
+    Configuration config = performance_configuration(failing.port());
+    forge_ops_tracker::PerformanceFlusher flusher(config, Client(config));
+    flusher.record("GET /posts", 10.0);
+    flusher.flush(); /* the first delivery fails: the histogram must survive it */
+
+    config.dsn = dsn_for_port(working.port());
+    flusher.record("GET /posts", 300.0);
+    flusher.flush();
+
+    ASSERT_TRUE(working.wait_for_request_count(1));
+    const auto sample = nlohmann::json::parse(request_body(working))["samples"][0];
+    ASSERT_TRUE(sample["histogram"] == (nlohmann::json{{"50", 1}, {"500", 1}}));
+    flusher.discard();
+}
+
+TEST(performance_a_histogram_count_recorded_during_delivery_is_sent_on_the_next_flush) {
+    TestServer server(202);
+    Configuration config = performance_configuration(server.port());
+    forge_ops_tracker::PerformanceFlusher flusher(config, Client(config));
+    flusher.record("GET /posts", 10.0);
+    flusher.set_before_delivery_hook_for_testing([&flusher] {
+        flusher.set_before_delivery_hook_for_testing({});
+        flusher.record("GET /posts", 300.0); /* same transaction, mid-delivery */
+        flusher.record("GET /new", 5.0);     /* a brand-new one, mid-delivery */
+    });
+
+    flusher.flush();
+    ASSERT_TRUE(server.wait_for_request_count(1));
+    ASSERT_TRUE(nlohmann::json::parse(request_body(server))["samples"][0]["histogram"] == (nlohmann::json{{"50", 1}}));
+
+    flusher.flush();
+    ASSERT_TRUE(server.wait_for_request_count(2));
+    const auto second = nlohmann::json::parse(request_body(server))["samples"];
+    ASSERT_TRUE(second.size() == 2);
+    for (const auto& sample : second) {
+        if (sample["transaction_name"] == "GET /posts") {
+            ASSERT_TRUE(sample["histogram"] == (nlohmann::json{{"500", 1}}));
+        } else {
+            ASSERT_TRUE(sample["transaction_name"] == "GET /new");
+            ASSERT_TRUE(sample["histogram"] == (nlohmann::json{{"50", 1}}));
+        }
+    }
+    flusher.discard();
+}
+
 TEST(performance_the_background_thread_flushes_on_its_own_interval) {
     TestServer server(202);
     Configuration config = performance_configuration(server.port());
@@ -1726,6 +1816,13 @@ int main() {
     RUN(performance_flush_does_nothing_when_there_is_nothing_to_send);
     RUN(performance_a_failed_delivery_keeps_every_bucket_so_the_next_flush_carries_more);
     RUN(performance_a_record_that_lands_during_delivery_is_never_lost);
+    RUN(histogram_bucket_for_returns_the_smallest_boundary_a_duration_fits_under_as_a_string);
+    RUN(histogram_bucket_for_returns_inf_for_anything_larger_than_the_largest_boundary);
+    RUN(histogram_bucket_for_puts_a_duration_exactly_on_a_boundary_into_that_boundarys_own_bucket);
+    RUN(histogram_boundaries_match_the_servers_histogram_percentile);
+    RUN(performance_flush_delivers_a_latency_histogram_alongside_count_sum_and_max);
+    RUN(performance_a_failed_delivery_keeps_histogram_counts_for_the_next_flush);
+    RUN(performance_a_histogram_count_recorded_during_delivery_is_sent_on_the_next_flush);
     RUN(performance_the_background_thread_flushes_on_its_own_interval);
     RUN(performance_destroying_a_flusher_delivers_whatever_is_left_but_discard_does_not);
     RUN(performance_samples_uri_swaps_the_trailing_events_segment);

@@ -34,6 +34,7 @@ add_library(forge_ops_tracker
     src/delivery_queue.cpp
     src/client.cpp
     src/reporter.cpp
+    src/histogram_bucketer.cpp
     src/performance_flusher.cpp
     src/span_buffer.cpp
     src/metric_buffer.cpp
