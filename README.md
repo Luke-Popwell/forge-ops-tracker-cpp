@@ -1,6 +1,6 @@
 # forge_ops_tracker (C++)
 
-C++ error reporting client for a [ForgeOps](../../) instance.
+C++ error reporting client for [ForgeOps](https://getforgeops.net).
 Requires a POSIX platform (macOS, Linux): see "Platform" below. Targets C++17.
 
 Built around a live delivery queue (Configuration, EventBuilder, DeliveryQueue, Reporter, Client)
