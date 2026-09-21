@@ -9,6 +9,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "forge_ops_tracker/sql_statement.hpp"
+
 #include "forge_ops_tracker/configuration.hpp"
 #include "forge_ops_tracker/span_buffer.hpp"
 
@@ -24,6 +26,16 @@ Configuration& init(const std::function<void(Configuration&)>& configure = nullp
  */
 void capture_exception(const std::exception_ptr& exception_ptr, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object());
 void capture_exception(const std::exception& exception, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object());
+
+/**
+ * The same as capture_exception, for an error caused by a database call: pass the SQL that ran.
+ * With Configuration::capture_sql_objects on (the default), the names of the stored procedure,
+ * table and view the statement touched are sent, so an issue says where to start looking. With
+ * Configuration::capture_sql_statement on too (off by default), the statement itself is sent as
+ * well, with every string and number replaced by "?" first. The raw statement never leaves this
+ * process either way. Call it from inside the catch block, so the exception's own type is kept.
+ */
+void capture_exception_with_sql(const std::exception& exception, const std::string& sql, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object());
 
 /**
  * Manually attaches an affected user to whatever gets reported from here on, *on this thread* (an

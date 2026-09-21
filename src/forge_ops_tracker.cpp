@@ -119,6 +119,10 @@ void capture_exception(const std::exception& exception, const nlohmann::json& co
     reporter().report(exception, context, user.empty() ? g_current_user : user, g_current_breadcrumbs);
 }
 
+void capture_exception_with_sql(const std::exception& exception, const std::string& sql, const nlohmann::json& context, const nlohmann::json& user) {
+    reporter().report(exception, context, user.empty() ? g_current_user : user, g_current_breadcrumbs, sql);
+}
+
 void set_user(const nlohmann::json& user) {
     g_current_user = user;
 }

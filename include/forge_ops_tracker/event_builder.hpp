@@ -37,12 +37,14 @@ public:
      * (omitted entirely when empty), never scrubbed: see scrub_payload's own comment for why.
      * `breadcrumbs` is a JSON array of {category,message,level,timestamp,data} entries, attached
      * under a top-level "breadcrumbs" key (omitted entirely when empty); message and data are
-     * scrubbed, category/level/timestamp never are.
+     * scrubbed, category/level/timestamp never are. `sql` is the raw statement behind the error when
+     * the caller has one (see capture_exception_with_sql); a SqlException carries its own, found
+     * automatically. Either way it's masked here before anything is attached: see sql_statement.hpp.
      */
-    nlohmann::json build(const std::exception_ptr& exception_ptr, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object(), const nlohmann::json& breadcrumbs = nlohmann::json::array());
+    nlohmann::json build(const std::exception_ptr& exception_ptr, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object(), const nlohmann::json& breadcrumbs = nlohmann::json::array(), const std::string& sql = "");
 
     /** Convenience overload for the common case of already having caught a std::exception. */
-    nlohmann::json build(const std::exception& exception, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object(), const nlohmann::json& breadcrumbs = nlohmann::json::array());
+    nlohmann::json build(const std::exception& exception, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object(), const nlohmann::json& breadcrumbs = nlohmann::json::array(), const std::string& sql = "");
 
 private:
     const Configuration& configuration_;
@@ -50,6 +52,7 @@ private:
     nlohmann::json backtrace() const;
     bool is_in_app(const std::string& image) const;
     nlohmann::json scrub_payload(nlohmann::json payload) const;
+    void attach_sql(nlohmann::json& payload, const std::string& raw_statement) const;
 
     /**
      * A deliberate no-op: see this class's own header comment above for why. Still called from

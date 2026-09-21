@@ -48,6 +48,18 @@ public:
      */
     bool capture_source_context = true;
 
+    /**
+     * When an error is reported with the SQL behind a failed database call (a SqlException, or
+     * capture_exception_with_sql), send the names of the stored procedure, table and view that SQL
+     * touched, so an issue says where to start looking. Names are identifiers, never values, which
+     * is why this defaults on. capture_sql_statement is the separate, opt-in step of also sending
+     * the statement itself, with every string and number replaced by "?"; off by default because
+     * even a masked statement describes your schema, and ForgeOps' own per-project setting is what
+     * durably governs whether the server stores it. See sql_statement.hpp.
+     */
+    bool capture_sql_objects = true;
+    bool capture_sql_statement = false;
+
     /** Whether add_breadcrumb records anything at all. On by default, matching every other client in this repo. */
     bool track_breadcrumbs = true;
 

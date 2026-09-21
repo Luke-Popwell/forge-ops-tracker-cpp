@@ -1751,6 +1751,122 @@ TEST(metrics_uris_swap_the_trailing_events_segment) {
     ASSERT_TRUE(*config.infrastructure_metrics_uri() == "http://127.0.0.1:1/api/v1/infrastructure_metrics");
 }
 
+
+/* ---- SQL capture ---------------------------------------------------------------------------- */
+
+TEST(sql_mask_replaces_strings_and_numbers_but_not_identifiers_or_placeholders) {
+    using forge_ops_tracker::sql_statement::mask;
+    ASSERT_TRUE(*mask("SELECT * FROM orders2 WHERE email = 'a@b.co' AND id = 42 AND x = $1") == "SELECT * FROM orders2 WHERE email = ? AND id = ? AND x = $1");
+    ASSERT_TRUE(*mask("SELECT price * 1.5 FROM t WHERE a IN (1,2,3)") == "SELECT price * ? FROM t WHERE a IN (?,?,?)");
+    ASSERT_TRUE(*mask("SELECT 1.5x FROM t") == "SELECT ?.5x FROM t");
+}
+
+TEST(sql_mask_handles_an_escaped_quote_a_cut_off_string_and_a_dollar_quoted_body) {
+    using forge_ops_tracker::sql_statement::mask;
+    ASSERT_TRUE(*mask("EXEC sp_x @t = 'it''s'") == "EXEC sp_x @t = ?");
+    ASSERT_TRUE(*mask("SELECT 1 WHERE n = 'oops") == "SELECT ? WHERE n = ?");
+    ASSERT_TRUE(*mask("DO $b$ BEGIN PERFORM 1; END $b$") == "DO ?");
+}
+
+TEST(sql_mask_is_idempotent_truncates_and_returns_nothing_for_blank) {
+    using forge_ops_tracker::sql_statement::mask;
+    std::string once = *mask("SELECT * FROM t WHERE a = 'x' AND b = 9");
+    ASSERT_TRUE(*mask(once) == once);
+    std::string long_sql = "SELECT ";
+    for (int i = 0; i < 3000; ++i) long_sql += "a, ";
+    ASSERT_TRUE(mask(long_sql + " b")->size() == forge_ops_tracker::sql_statement::kMaxLength + 3);
+    ASSERT_TRUE(!mask("  ").has_value());
+}
+
+TEST(sql_extract_finds_a_stored_procedure_with_its_schema) {
+    using forge_ops_tracker::sql_statement::extract_objects;
+    auto found = extract_objects("EXEC dbo.sp_refund_order @id = ?");
+    ASSERT_TRUE(found.has_value());
+    ASSERT_TRUE((*found)["operation"] == "EXEC");
+    ASSERT_TRUE((*found)["procedures"] == nlohmann::json::array({"dbo.sp_refund_order"}));
+    ASSERT_TRUE((*found)["relations"] == nlohmann::json::array());
+    ASSERT_TRUE((*extract_objects("CALL refund_order(?, ?)"))["procedures"] == nlohmann::json::array({"refund_order"}));
+    ASSERT_TRUE((*extract_objects("SELECT refund_order(?, ?)"))["procedures"] == nlohmann::json::array({"refund_order"}));
+}
+
+TEST(sql_extract_finds_views_joined_tables_and_table_functions) {
+    using forge_ops_tracker::sql_statement::extract_objects;
+    ASSERT_TRUE((*extract_objects("SELECT * FROM v_totals t JOIN public.customers c ON c.id = t.id"))["relations"] == nlohmann::json::array({"v_totals", "public.customers"}));
+    ASSERT_TRUE((*extract_objects("SELECT * FROM get_open_orders(?) o"))["procedures"] == nlohmann::json::array({"get_open_orders"}));
+    ASSERT_TRUE((*extract_objects("UPDATE \"Order Items\" SET qty = ?"))["relations"] == nlohmann::json::array({"\"Order Items\""}));
+    ASSERT_TRUE((*extract_objects("INSERT INTO [dbo].[audit_log] (a) VALUES (?)"))["relations"] == nlohmann::json::array({"[dbo].[audit_log]"}));
+}
+
+TEST(sql_extract_does_not_misread_column_lists_builtins_or_from_inside_extract) {
+    using forge_ops_tracker::sql_statement::extract_objects;
+    ASSERT_TRUE((*extract_objects("INSERT INTO audit_log (a) VALUES (?)"))["procedures"] == nlohmann::json::array());
+    ASSERT_TRUE((*extract_objects("SELECT count(*) FROM orders"))["procedures"] == nlohmann::json::array());
+    ASSERT_TRUE((*extract_objects("SELECT 1 FROM orders WHERE extract(year FROM created_at) = ?"))["relations"] == nlohmann::json::array({"orders"}));
+    ASSERT_TRUE(!extract_objects("garbage").has_value());
+}
+
+TEST(sql_find_in_reads_a_sql_exception_a_nested_one_and_sqlite_text) {
+    using forge_ops_tracker::SqlException;
+    using forge_ops_tracker::sql_statement::find_in;
+    ASSERT_TRUE(find_in(SqlException("boom", "SELECT 1")) == "SELECT 1");
+    ASSERT_TRUE(find_in(std::runtime_error("no such table: t (code 1 SQLITE_ERROR): , while compiling: SELECT * FROM t")) == "SELECT * FROM t");
+    ASSERT_TRUE(find_in(std::runtime_error("plain")).empty());
+
+    std::string nested_result;
+    try {
+        try {
+            throw SqlException("db", "CALL x(1)");
+        } catch (...) {
+            std::throw_with_nested(std::runtime_error("refund failed"));
+        }
+    } catch (const std::exception& e) {
+        nested_result = find_in(e);
+    }
+    ASSERT_TRUE(nested_result == "CALL x(1)");
+}
+
+TEST(sql_event_builder_sends_the_procedure_name_by_default_and_the_statement_only_when_opted_in) {
+    Configuration config;
+    config.environment = "production";
+    EventBuilder builder(config);
+    const std::string sql = "EXEC dbo.sp_refund_order @order_id = 8814, @note = 'a@b.co'";
+
+    nlohmann::json payload;
+    try {
+        throw forge_ops_tracker::SqlException("boom", sql);
+    } catch (const std::exception& e) {
+        payload = builder.build(e);
+    }
+    ASSERT_TRUE(payload["sql_objects"]["procedures"] == nlohmann::json::array({"dbo.sp_refund_order"}));
+    ASSERT_TRUE(!payload.contains("sql_statement"));
+
+    config.capture_sql_statement = true;
+    try {
+        throw fot_test_exc::BoomError("boom");
+    } catch (const std::exception& e) {
+        payload = builder.build(e, nlohmann::json::object(), nlohmann::json::object(), nlohmann::json::array(), sql);
+    }
+    ASSERT_TRUE(payload["sql_statement"] == "EXEC dbo.sp_refund_order @order_id = ?, @note = ?");
+    ASSERT_TRUE(payload["exception_class"] == "fot_test_exc::BoomError");
+
+    config.capture_sql_objects = false;
+    config.capture_sql_statement = false;
+    try {
+        throw forge_ops_tracker::SqlException("boom", sql);
+    } catch (const std::exception& e) {
+        payload = builder.build(e);
+    }
+    ASSERT_TRUE(!payload.contains("sql_objects") && !payload.contains("sql_statement"));
+
+    config.capture_sql_objects = true;
+    try {
+        throw fot_test_exc::BoomError("boom");
+    } catch (const std::exception& e) {
+        payload = builder.build(e);
+    }
+    ASSERT_TRUE(!payload.contains("sql_objects"));
+}
+
 int main() {
     RUN(configuration_defaults);
     RUN(configuration_api_key_and_ingestion_uri);
@@ -1831,6 +1947,14 @@ int main() {
     RUN(tracker_scoped_transaction_records_even_when_the_scope_throws);
     RUN(tracker_track_performance_off_records_and_delivers_nothing);
     RUN(tracker_install_terminate_handler_is_idempotent);
+    RUN(sql_mask_replaces_strings_and_numbers_but_not_identifiers_or_placeholders);
+    RUN(sql_mask_handles_an_escaped_quote_a_cut_off_string_and_a_dollar_quoted_body);
+    RUN(sql_mask_is_idempotent_truncates_and_returns_nothing_for_blank);
+    RUN(sql_extract_finds_a_stored_procedure_with_its_schema);
+    RUN(sql_extract_finds_views_joined_tables_and_table_functions);
+    RUN(sql_extract_does_not_misread_column_lists_builtins_or_from_inside_extract);
+    RUN(sql_find_in_reads_a_sql_exception_a_nested_one_and_sqlite_text);
+    RUN(sql_event_builder_sends_the_procedure_name_by_default_and_the_statement_only_when_opted_in);
 
 
     RUN(tracing_span_buffer_nests_spans_under_the_open_one_and_the_root_with_the_wire_shape);

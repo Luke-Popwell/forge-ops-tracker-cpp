@@ -31,6 +31,7 @@ add_library(forge_ops_tracker
     src/configuration.cpp
     src/pii_scrubber.cpp
     src/event_builder.cpp
+    src/sql_statement.cpp
     src/delivery_queue.cpp
     src/client.cpp
     src/reporter.cpp

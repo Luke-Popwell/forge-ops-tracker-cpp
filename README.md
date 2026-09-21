@@ -20,7 +20,7 @@ include(FetchContent)
 FetchContent_Declare(
   forge_ops_tracker
   GIT_REPOSITORY https://github.com/Luke-Popwell/forge-ops-tracker-cpp.git
-  GIT_TAG v0.1.0
+  GIT_TAG v0.3.0
 )
 FetchContent_MakeAvailable(forge_ops_tracker)
 target_link_libraries(your_app PRIVATE forge_ops_tracker)
@@ -365,6 +365,35 @@ earlier layer, not the only one. Deliberately does *not* support `Project#additi
 scrubbed, since redacting it would defeat the whole point of identifying users in the first place.
 
 To disable it: `config.scrub_pii = false;`
+
+## Database errors
+
+C++ exceptions carry no SQL of their own, so the code that ran the query hands it over, in either of two ways. Throw (or rethrow from a catch of the driver's own exception) a `forge_ops_tracker::SqlException`, or report an exception you already have with `capture_exception_with_sql`. Either way the event includes the names of the stored procedure, table and view that SQL touched, so the issue tells you where to start looking. Names are identifiers, never values; the raw statement never leaves the process.
+
+To also send the SQL statement itself, opt in. Every string and number is replaced by `?` before it
+leaves your process (`WHERE email = 'a@b.co' AND id = 42` is sent as `WHERE email = ? AND id = ?`),
+and ForgeOps masks it again on arrival:
+
+```cpp
+try {
+    session << query, soci::use(id);
+} catch (const std::exception& e) {
+    forge_ops_tracker::capture_exception_with_sql(e, query);
+    throw;
+}
+
+// Or attach it to the exception itself:
+//   throw forge_ops_tracker::SqlException(e.what(), query);
+
+// Opt in to also sending the masked statement (default false). capture_sql_objects (default true)
+// controls the names.
+forge_ops_tracker::init([](forge_ops_tracker::Configuration& c) { c.capture_sql_statement = true; });
+```
+
+Each ForgeOps project also has its own "Capture the SQL behind database errors" setting. Turn it off
+there and the statement is never stored for that project, whatever this flag says; the names are
+still kept. A view and a table are written the same way in SQL, so both show as tables/views; the
+database's own error message usually settles which it was.
 
 ## Running the tests
 

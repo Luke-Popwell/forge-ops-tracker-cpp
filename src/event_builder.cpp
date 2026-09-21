@@ -14,6 +14,7 @@
 #endif
 
 #include "forge_ops_tracker/pii_scrubber.hpp"
+#include "forge_ops_tracker/sql_statement.hpp"
 
 namespace forge_ops_tracker {
 
@@ -77,15 +78,19 @@ const std::regex& frame_pattern() {
 
 EventBuilder::EventBuilder(const Configuration& configuration) : configuration_(configuration) {}
 
-nlohmann::json EventBuilder::build(const std::exception_ptr& exception_ptr, const nlohmann::json& context, const nlohmann::json& user, const nlohmann::json& breadcrumbs) {
+nlohmann::json EventBuilder::build(const std::exception_ptr& exception_ptr, const nlohmann::json& context, const nlohmann::json& user, const nlohmann::json& breadcrumbs, const std::string& sql) {
     std::string exception_class = "unknown exception";
     std::string message;
+    std::string raw_statement = sql;
 
     try {
         std::rethrow_exception(exception_ptr);
     } catch (const std::exception& e) {
         exception_class = exception_class_name(e);
         message = e.what();
+        if (raw_statement.empty()) {
+            raw_statement = sql_statement::find_in(e);
+        }
     } catch (...) {
         // A non-std::exception throw: any type at all can be thrown in C++. There's genuinely
         // no name or message available for this case; exception_class stays "unknown exception"
@@ -115,6 +120,7 @@ nlohmann::json EventBuilder::build(const std::exception_ptr& exception_ptr, cons
     if (!breadcrumbs.empty()) {
         payload["breadcrumbs"] = breadcrumbs;
     }
+    attach_sql(payload, raw_statement);
 
     nlohmann::json built = configuration_.scrub_pii ? scrub_payload(payload) : payload;
 
@@ -129,7 +135,7 @@ nlohmann::json EventBuilder::build(const std::exception_ptr& exception_ptr, cons
     return built;
 }
 
-nlohmann::json EventBuilder::build(const std::exception& exception, const nlohmann::json& context, const nlohmann::json& user, const nlohmann::json& breadcrumbs) {
+nlohmann::json EventBuilder::build(const std::exception& exception, const nlohmann::json& context, const nlohmann::json& user, const nlohmann::json& breadcrumbs, const std::string& sql) {
     // std::make_exception_ptr(exception) looks right here but silently slices: template argument
     // deduction picks E from `exception`'s declared type (std::exception&, this parameter's own
     // static type), not its dynamic type, so a derived exception like a caught std::runtime_error
@@ -148,7 +154,30 @@ nlohmann::json EventBuilder::build(const std::exception& exception, const nlohma
     // that path genuinely can't recover a derived type through a plain base-class reference; no
     // function can work around that, it's a hard C++ limitation, not a bug in this one.
     std::exception_ptr current = std::current_exception();
-    return build(current ? current : std::make_exception_ptr(exception), context, user, breadcrumbs);
+    return build(current ? current : std::make_exception_ptr(exception), context, user, breadcrumbs, sql);
+}
+
+// See sql_statement.hpp for how the statement is masked. The statement itself only goes out when
+// capture_sql_statement is on; the extracted names go out on their own (capture_sql_objects) so an
+// issue can still name the procedure or view involved.
+void EventBuilder::attach_sql(nlohmann::json& payload, const std::string& raw_statement) const {
+    if (!configuration_.capture_sql_objects && !configuration_.capture_sql_statement) {
+        return;
+    }
+
+    std::optional<std::string> masked = sql_statement::mask(raw_statement);
+    if (!masked) {
+        return;
+    }
+
+    if (configuration_.capture_sql_objects) {
+        if (std::optional<nlohmann::json> objects = sql_statement::extract_objects(*masked)) {
+            payload["sql_objects"] = *objects;
+        }
+    }
+    if (configuration_.capture_sql_statement) {
+        payload["sql_statement"] = *masked;
+    }
 }
 
 nlohmann::json EventBuilder::backtrace() const {
@@ -202,6 +231,9 @@ bool EventBuilder::is_in_app(const std::string& image) const {
 
 nlohmann::json EventBuilder::scrub_payload(nlohmann::json payload) const {
     payload["message"] = pii_scrubber::scrub_string(payload["message"].get<std::string>());
+    if (payload.contains("sql_statement")) {
+        payload["sql_statement"] = pii_scrubber::scrub_string(payload["sql_statement"].get<std::string>());
+    }
     for (auto& frame : payload["backtrace"]) {
         if (frame["file"].is_string()) {
             frame["file"] = pii_scrubber::scrub_string(frame["file"].get<std::string>());
