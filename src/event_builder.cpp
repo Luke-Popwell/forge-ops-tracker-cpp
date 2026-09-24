@@ -78,7 +78,7 @@ const std::regex& frame_pattern() {
 
 EventBuilder::EventBuilder(const Configuration& configuration) : configuration_(configuration) {}
 
-nlohmann::json EventBuilder::build(const std::exception_ptr& exception_ptr, const nlohmann::json& context, const nlohmann::json& user, const nlohmann::json& breadcrumbs, const std::string& sql) {
+nlohmann::json EventBuilder::build(const std::exception_ptr& exception_ptr, const nlohmann::json& context, const nlohmann::json& user, const nlohmann::json& breadcrumbs, const std::string& sql, const std::optional<std::string>& trace_id) {
     std::string exception_class = "unknown exception";
     std::string message;
     std::string raw_statement = sql;
@@ -132,10 +132,15 @@ nlohmann::json EventBuilder::build(const std::exception_ptr& exception_ptr, cons
     if (!user.empty()) {
         built["user"] = user;
     }
+    // Also attached after scrubbing: a structured id, not free text. Links this error to that
+    // trace's spans and, through traceparent, to errors in the other services it touched.
+    if (trace_id) {
+        built["trace_id"] = *trace_id;
+    }
     return built;
 }
 
-nlohmann::json EventBuilder::build(const std::exception& exception, const nlohmann::json& context, const nlohmann::json& user, const nlohmann::json& breadcrumbs, const std::string& sql) {
+nlohmann::json EventBuilder::build(const std::exception& exception, const nlohmann::json& context, const nlohmann::json& user, const nlohmann::json& breadcrumbs, const std::string& sql, const std::optional<std::string>& trace_id) {
     // std::make_exception_ptr(exception) looks right here but silently slices: template argument
     // deduction picks E from `exception`'s declared type (std::exception&, this parameter's own
     // static type), not its dynamic type, so a derived exception like a caught std::runtime_error
@@ -154,7 +159,7 @@ nlohmann::json EventBuilder::build(const std::exception& exception, const nlohma
     // that path genuinely can't recover a derived type through a plain base-class reference; no
     // function can work around that, it's a hard C++ limitation, not a bug in this one.
     std::exception_ptr current = std::current_exception();
-    return build(current ? current : std::make_exception_ptr(exception), context, user, breadcrumbs, sql);
+    return build(current ? current : std::make_exception_ptr(exception), context, user, breadcrumbs, sql, trace_id);
 }
 
 // See sql_statement.hpp for how the statement is masked. The statement itself only goes out when

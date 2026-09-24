@@ -1,6 +1,8 @@
 #pragma once
 
 #include <exception>
+#include <optional>
+#include <string>
 
 #include <nlohmann/json.hpp>
 
@@ -21,8 +23,8 @@ class Reporter {
 public:
     Reporter(const Configuration& configuration, EventBuilder event_builder, DeliveryQueue& delivery_queue);
 
-    void report(const std::exception_ptr& exception_ptr, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object(), const nlohmann::json& breadcrumbs = nlohmann::json::array(), const std::string& sql = "");
-    void report(const std::exception& exception, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object(), const nlohmann::json& breadcrumbs = nlohmann::json::array(), const std::string& sql = "");
+    void report(const std::exception_ptr& exception_ptr, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object(), const nlohmann::json& breadcrumbs = nlohmann::json::array(), const std::string& sql = "", const std::optional<std::string>& trace_id = std::nullopt);
+    void report(const std::exception& exception, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object(), const nlohmann::json& breadcrumbs = nlohmann::json::array(), const std::string& sql = "", const std::optional<std::string>& trace_id = std::nullopt);
 
 private:
     const Configuration& configuration_;

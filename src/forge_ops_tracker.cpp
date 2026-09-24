@@ -1,5 +1,6 @@
 #include "forge_ops_tracker/forge_ops_tracker.hpp"
 
+#include <cctype>
 #include <cstdlib>
 #include <ctime>
 #include <memory>
@@ -73,6 +74,10 @@ void ensure_metric_buffers() {
     }
 }
 
+std::optional<std::string> open_trace_id() {
+    return g_trace ? std::optional<std::string>(g_trace->trace_id()) : std::nullopt;
+}
+
 SpanQueue& span_queue() {
     if (!g_span_queue) {
         g_span_queue = std::make_unique<SpanQueue>(configuration(), Client(configuration()));
@@ -89,7 +94,7 @@ void handle_terminate() {
     // catch (...) branch does.
     std::exception_ptr current = std::current_exception();
     if (current) {
-        reporter().report(current, nlohmann::json::object(), g_current_user, g_current_breadcrumbs);
+        reporter().report(current, nlohmann::json::object(), g_current_user, g_current_breadcrumbs, "", open_trace_id());
     }
 
     if (g_previous_terminate_handler) {
@@ -112,15 +117,15 @@ Configuration& init(const std::function<void(Configuration&)>& configure) {
 }
 
 void capture_exception(const std::exception_ptr& exception_ptr, const nlohmann::json& context, const nlohmann::json& user) {
-    reporter().report(exception_ptr, context, user.empty() ? g_current_user : user, g_current_breadcrumbs);
+    reporter().report(exception_ptr, context, user.empty() ? g_current_user : user, g_current_breadcrumbs, "", open_trace_id());
 }
 
 void capture_exception(const std::exception& exception, const nlohmann::json& context, const nlohmann::json& user) {
-    reporter().report(exception, context, user.empty() ? g_current_user : user, g_current_breadcrumbs);
+    reporter().report(exception, context, user.empty() ? g_current_user : user, g_current_breadcrumbs, "", open_trace_id());
 }
 
 void capture_exception_with_sql(const std::exception& exception, const std::string& sql, const nlohmann::json& context, const nlohmann::json& user) {
-    reporter().report(exception, context, user.empty() ? g_current_user : user, g_current_breadcrumbs, sql);
+    reporter().report(exception, context, user.empty() ? g_current_user : user, g_current_breadcrumbs, sql, open_trace_id());
 }
 
 void set_user(const nlohmann::json& user) {
@@ -227,7 +232,9 @@ ScopedSpan::~ScopedSpan() {
     }
 }
 
-ScopedTrace::ScopedTrace(std::string root_name)
+ScopedTrace::ScopedTrace(std::string root_name) : ScopedTrace(std::move(root_name), std::nullopt) {}
+
+ScopedTrace::ScopedTrace(std::string root_name, const std::optional<std::string>& traceparent)
     : root_name_(std::move(root_name)),
       started_at_(std::chrono::system_clock::now()),
       timer_(std::chrono::steady_clock::now()),
@@ -236,9 +243,11 @@ ScopedTrace::ScopedTrace(std::string root_name)
         nested_.emplace(root_name_, "service");
         return;
     }
+    // Started whenever reporting is enabled, even with track_tracing off: its id still goes on errors
+    // and outgoing headers, and the buffer just never sends its spans.
     const Configuration& config = configuration();
-    if (config.track_tracing && config.is_enabled()) {
-        g_trace = std::make_unique<SpanBuffer>(config);
+    if (config.is_enabled()) {
+        g_trace = std::make_unique<SpanBuffer>(config, traceparent ? trace_parent::parse(*traceparent) : std::nullopt);
     }
 }
 
@@ -259,6 +268,30 @@ ScopedTrace::~ScopedTrace() {
     } catch (...) {
         // Same reasoning as ScopedSpan's destructor.
     }
+}
+
+std::string ScopedHttpSpan::name_for(const std::string& method, const std::string& url) {
+    std::string name = method.empty() ? "GET" : method;
+    for (char& c : name) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return name + " " + trace_parent::url_host(url).value_or("unknown");
+}
+
+// The span id exists as soon as span_ is constructed, before the call is made, which is what lets the
+// header name the span the call is then recorded as.
+ScopedHttpSpan::ScopedHttpSpan(const std::string& method, const std::string& url, nlohmann::json data)
+    : span_(name_for(method, url), "http", std::move(data)) {
+    if (span_.span_id().empty() || !g_trace) {
+        return;
+    }
+    if (configuration().should_propagate_trace(trace_parent::url_host(url))) {
+        traceparent_ = trace_parent::build(g_trace->trace_id(), span_.span_id());
+    }
+}
+
+std::optional<std::string> current_trace_id() {
+    return open_trace_id();
 }
 
 void record_span(const std::string& name, const std::string& kind, std::chrono::system_clock::time_point started_at, double duration_ms, const nlohmann::json& data) {

@@ -13,6 +13,7 @@
 
 #include "forge_ops_tracker/configuration.hpp"
 #include "forge_ops_tracker/span_buffer.hpp"
+#include "forge_ops_tracker/trace_parent.hpp"
 
 namespace forge_ops_tracker {
 
@@ -155,7 +156,8 @@ void flush_metrics();
  * thing took at least Configuration::trace_capture_threshold (1 second by default), so fast calls
  * cost nothing on the wire. Wrap the unit of work in a ScopedTrace (or trace()), and anything inside
  * it, on the same thread, can add spans with ScopedSpan (or span()); a span nests under whichever
- * span is open. Traces are per service: nothing is propagated across services.
+ * span is open. A trace can also be followed into the services you call (ScopedHttpSpan) and continued
+ * from the service that called you (ScopedTrace's traceparent constructor): see below.
  *
  *     {
  *         forge_ops_tracker::ScopedTrace trace("GET /checkout");
@@ -165,9 +167,11 @@ void flush_metrics();
  *
  * `kind` is one of controller, service, database, redis, http, job, other (anything else is sent as
  * "other", since the server rejects a whole trace over one unknown kind). Outside a trace every
- * call is a harmless no-op, as is everything when Configuration::track_tracing is false or reporting
- * isn't enabled for this environment. Both RAII types record from their destructor, so a scope that
- * throws is still recorded and sent.
+ * call is a harmless no-op, as is everything when reporting isn't enabled for this environment. With
+ * Configuration::track_tracing false a trace still starts (its id goes on errors and on the traceparent
+ * header) but is never sent. Both RAII types record from their destructor, so a scope that throws is
+ * still recorded and sent. Every error captured on a thread while its trace is open carries that
+ * trace's id (see current_trace_id).
  *
  * This client has no web framework integration, so nothing starts a trace or records a span
  * automatically: you wrap what you want traced. A ScopedTrace inside an open trace does not start a
@@ -183,6 +187,9 @@ public:
     ScopedSpan(const ScopedSpan&) = delete;
     ScopedSpan& operator=(const ScopedSpan&) = delete;
 
+    /** This span's id (16 lowercase hex characters), or empty outside a trace. */
+    const std::string& span_id() const { return span_id_; }
+
 private:
     std::string name_;
     std::string kind_;
@@ -195,6 +202,17 @@ private:
 class ScopedTrace {
 public:
     explicit ScopedTrace(std::string root_name);
+
+    /**
+     * The same, continuing the caller's trace when `traceparent` is a usable W3C traceparent header
+     * value, typically the incoming request's own header: the trace keeps the caller's trace id, and
+     * its root span records the caller's span as its parent, so it nests under that span on
+     * ForgeOps. nullopt, blank, or malformed starts a fresh trace, exactly like the constructor
+     * above. Ignored inside an already-open trace.
+     *
+     *     forge_ops_tracker::ScopedTrace trace("POST /orders", request.header("traceparent"));
+     */
+    ScopedTrace(std::string root_name, const std::optional<std::string>& traceparent);
     ~ScopedTrace();
 
     ScopedTrace(const ScopedTrace&) = delete;
@@ -208,6 +226,45 @@ private:
     std::optional<ScopedSpan> nested_; // set when this was nested inside an open trace
 };
 
+/**
+ * Times an outgoing HTTP call as an "http" span named "<METHOD> <host>" (never the path or query,
+ * which can carry ids or tokens) and hands back, from traceparent(), the W3C traceparent header value
+ * to send with that request: its parent id is this span's own id, so the called service's root span
+ * nests under it when it continues the trace. Add it however your HTTP client does:
+ *
+ *     {
+ *         forge_ops_tracker::ScopedHttpSpan http("POST", url);
+ *         if (http.traceparent()) request.set_header(forge_ops_tracker::trace_parent::header, *http.traceparent());
+ *         response = client.send(request);
+ *     }
+ *
+ * traceparent() is nullopt outside a trace, when Configuration::propagate_traces is false, or when the
+ * URL's host isn't in Configuration::trace_propagation_targets; outside a trace no span is recorded
+ * either. Recorded from the destructor, so a call that throws is still recorded. This client doesn't
+ * instrument libcurl or any other HTTP client on its own, so a call made without this carries no header.
+ */
+class ScopedHttpSpan {
+public:
+    ScopedHttpSpan(const std::string& method, const std::string& url, nlohmann::json data = nlohmann::json::object());
+
+    ScopedHttpSpan(const ScopedHttpSpan&) = delete;
+    ScopedHttpSpan& operator=(const ScopedHttpSpan&) = delete;
+
+    const std::optional<std::string>& traceparent() const { return traceparent_; }
+
+    /** This span's id, or empty outside a trace. */
+    const std::string& span_id() const { return span_.span_id(); }
+
+private:
+    ScopedSpan span_;
+    std::optional<std::string> traceparent_;
+
+    static std::string name_for(const std::string& method, const std::string& url);
+};
+
+/** The id of the trace open on this thread (32 lowercase hex characters), or nullopt outside a trace. */
+std::optional<std::string> current_trace_id();
+
 /** Records a span you timed yourself under the current one; a no-op outside a trace. */
 void record_span(const std::string& name, const std::string& kind, std::chrono::system_clock::time_point started_at, double duration_ms, const nlohmann::json& data = nlohmann::json::object());
 
@@ -216,6 +273,28 @@ template <typename F>
 auto trace(const std::string& root_name, F&& f) -> decltype(f()) {
     ScopedTrace scoped(root_name);
     return f();
+}
+
+/** The same, continuing `traceparent` (see ScopedTrace's traceparent constructor). */
+template <typename F>
+auto trace(const std::string& root_name, const std::optional<std::string>& traceparent, F&& f) -> decltype(f()) {
+    ScopedTrace scoped(root_name, traceparent);
+    return f();
+}
+
+/**
+ * Runs `f` inside a ScopedHttpSpan, passing it the traceparent header value to send (nullopt when there
+ * is none), and returns whatever `f` returned.
+ *
+ *     auto response = forge_ops_tracker::http_span("POST", url, [&](const std::optional<std::string>& traceparent) {
+ *         if (traceparent) request.set_header("traceparent", *traceparent);
+ *         return client.send(request);
+ *     });
+ */
+template <typename F>
+auto http_span(const std::string& method, const std::string& url, F&& f) -> decltype(f(std::declval<const std::optional<std::string>&>())) {
+    ScopedHttpSpan scoped(method, url);
+    return f(scoped.traceparent());
 }
 
 /** Runs `f` as a span (see ScopedSpan) and returns whatever `f` returned. */

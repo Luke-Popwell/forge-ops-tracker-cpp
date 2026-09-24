@@ -1,5 +1,6 @@
 #include "forge_ops_tracker/configuration.hpp"
 
+#include <cctype>
 #include <regex>
 #include <sstream>
 
@@ -137,6 +138,49 @@ void Configuration::log(const std::string& message) const {
     if (logger) {
         logger(message);
     }
+}
+
+bool Configuration::should_propagate_trace(const std::optional<std::string>& host) const {
+    if (!propagate_traces) {
+        return false;
+    }
+    if (!trace_propagation_targets) {
+        return true;
+    }
+    std::string normalized = host.value_or("");
+    for (char& c : normalized) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (normalized.empty()) {
+        return false;
+    }
+    for (const auto& target : *trace_propagation_targets) {
+        if (const auto* pattern = std::get_if<std::regex>(&target)) {
+            if (std::regex_search(normalized, *pattern)) {
+                return true;
+            }
+            continue;
+        }
+        std::string domain = std::get<std::string>(target);
+        for (char& c : domain) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (!domain.empty() && domain[0] == '.') {
+            domain.erase(0, 1);
+        }
+        if (domain.empty() || normalized.size() < domain.size()) {
+            continue;
+        }
+        if (normalized == domain) {
+            return true;
+        }
+        // Same length but not equal leaves no room for the "." a subdomain needs.
+        std::size_t prefix = normalized.size() - domain.size();
+        if (prefix > 0 && normalized[prefix - 1] == '.' && normalized.compare(prefix, std::string::npos, domain) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace forge_ops_tracker

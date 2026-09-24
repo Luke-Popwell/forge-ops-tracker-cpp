@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cmath>
@@ -41,6 +42,7 @@
 #include "forge_ops_tracker/pii_scrubber.hpp"
 #include "forge_ops_tracker/reporter.hpp"
 #include "forge_ops_tracker/span_buffer.hpp"
+#include "forge_ops_tracker/trace_parent.hpp"
 
 using forge_ops_tracker::Client;
 using forge_ops_tracker::Configuration;
@@ -1567,6 +1569,225 @@ TEST(tracing_spans_uri_swaps_the_trailing_events_segment) {
     ASSERT_TRUE(*config.spans_uri() == "http://127.0.0.1:1/api/v1/spans");
 }
 
+/* ---- Trace context (W3C traceparent) ------------------------------------------------------------ */
+
+namespace tp = forge_ops_tracker::trace_parent;
+static const std::string kTraceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+static const std::string kSpanId = "00f067aa0ba902b7";
+
+TEST(traceparent_parses_a_valid_version_00_header) {
+    auto context = tp::parse("00-" + kTraceId + "-" + kSpanId + "-01");
+    ASSERT_TRUE(context.has_value());
+    ASSERT_TRUE(context->trace_id == kTraceId && context->parent_span_id == kSpanId);
+    ASSERT_TRUE(tp::parse("  00-" + kTraceId + "-" + kSpanId + "-00 ").has_value());
+}
+
+TEST(traceparent_rejects_anything_malformed) {
+    std::string upper_trace = kTraceId;
+    for (char& c : upper_trace) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    const std::vector<std::string> bad = {
+        "",
+        "garbage",
+        "00-" + upper_trace + "-" + kSpanId + "-01",
+        "00-" + kTraceId + "-00F067AA0BA902B7-01",
+        "ff-" + kTraceId + "-" + kSpanId + "-01",
+        "00-" + std::string(32, '0') + "-" + kSpanId + "-01",
+        "00-" + kTraceId + "-" + std::string(16, '0') + "-01",
+        "00-" + kTraceId.substr(0, 31) + "-" + kSpanId + "-01",
+        "00-" + kTraceId + "-" + kSpanId.substr(0, 15) + "-01",
+        "00_" + kTraceId + "-" + kSpanId + "-01",
+        "00-" + kTraceId + "-" + kSpanId + "-1",
+        "00-" + kTraceId + "-" + kSpanId + "-01-extra",
+        "0g-" + kTraceId + "-" + kSpanId + "-01",
+        "01-" + kTraceId + "-" + kSpanId + "-01x",
+    };
+    for (const auto& value : bad) {
+        if (tp::parse(value)) {
+            std::printf("  accepted \"%s\"\n", value.c_str());
+            ASSERT_TRUE(false);
+        }
+    }
+}
+
+TEST(traceparent_accepts_a_future_version_with_extra_fields) {
+    auto context = tp::parse("01-" + kTraceId + "-" + kSpanId + "-01-what-comes-next");
+    ASSERT_TRUE(context && context->trace_id == kTraceId);
+    ASSERT_TRUE(tp::parse("01-" + kTraceId + "-" + kSpanId + "-01").has_value());
+}
+
+TEST(traceparent_builds_a_sampled_version_00_header_and_ids_are_lowercase_hex_never_all_zeros) {
+    ASSERT_TRUE(tp::build(kTraceId, kSpanId) == "00-" + kTraceId + "-" + kSpanId + "-01");
+    std::string trace_id = tp::generate_trace_id();
+    std::string span_id = tp::generate_span_id();
+    ASSERT_TRUE(trace_id.size() == 32 && span_id.size() == 16);
+    ASSERT_TRUE(trace_id.find_first_not_of("0123456789abcdef") == std::string::npos);
+    ASSERT_TRUE(span_id.find_first_not_of("0123456789abcdef") == std::string::npos);
+    ASSERT_TRUE(trace_id.find_first_not_of('0') != std::string::npos);
+}
+
+TEST(traceparent_url_host_extracts_just_the_lowercased_host) {
+    ASSERT_TRUE(tp::url_host("https://API.Example.com/orders/42?x=1") == std::optional<std::string>("api.example.com"));
+    ASSERT_TRUE(tp::url_host("http://user:pw@example.com:8080/x") == std::optional<std::string>("example.com"));
+    ASSERT_TRUE(tp::url_host("http://example.com?q=a@b") == std::optional<std::string>("example.com"));
+    ASSERT_TRUE(tp::url_host("http://[::1]:3000/") == std::optional<std::string>("[::1]"));
+    ASSERT_TRUE(!tp::url_host("example.com/no-scheme"));
+    ASSERT_TRUE(!tp::url_host("http:///path-only"));
+    ASSERT_TRUE(!tp::url_host(""));
+}
+
+TEST(trace_propagation_goes_to_every_host_by_default_and_nowhere_when_off) {
+    Configuration config;
+    ASSERT_TRUE(config.propagate_traces);
+    ASSERT_TRUE(!config.trace_propagation_targets.has_value());
+    ASSERT_TRUE(config.should_propagate_trace(std::string("anything.example")));
+    ASSERT_TRUE(config.should_propagate_trace(std::nullopt));
+    config.propagate_traces = false;
+    ASSERT_TRUE(!config.should_propagate_trace(std::string("anything.example")));
+}
+
+TEST(trace_propagation_targets_match_hosts_on_a_dot_boundary_and_search_regexes_in_the_host) {
+    Configuration config;
+    config.trace_propagation_targets = std::vector<forge_ops_tracker::TracePropagationTarget>{
+        "Example.com", std::string(".internal.corp"), "", std::regex(R"(^svc-\d+\.local$)")};
+    ASSERT_TRUE(config.should_propagate_trace(std::string("example.com")));
+    ASSERT_TRUE(config.should_propagate_trace(std::string("API.example.COM")));
+    ASSERT_TRUE(config.should_propagate_trace(std::string("internal.corp")));
+    ASSERT_TRUE(config.should_propagate_trace(std::string("db.internal.corp")));
+    ASSERT_TRUE(config.should_propagate_trace(std::string("SVC-12.local")));
+    ASSERT_TRUE(!config.should_propagate_trace(std::string("svc-x.local")));
+    ASSERT_TRUE(!config.should_propagate_trace(std::string("badexample.com")));
+    ASSERT_TRUE(!config.should_propagate_trace(std::string("example.com.evil.net")));
+    ASSERT_TRUE(!config.should_propagate_trace(std::string("other.net")));
+    ASSERT_TRUE(!config.should_propagate_trace(std::string("examplf.com"))); /* same length as a target, not equal */
+    ASSERT_TRUE(!config.should_propagate_trace(std::nullopt));
+
+    config.trace_propagation_targets = std::vector<forge_ops_tracker::TracePropagationTarget>{};
+    ASSERT_TRUE(!config.should_propagate_trace(std::string("example.com")));
+}
+
+TEST(trace_context_span_buffer_continues_an_incoming_trace_and_never_sends_with_track_tracing_off) {
+    Configuration config = tracing_configuration();
+    forge_ops_tracker::SpanBuffer continued(config, tp::parse("00-" + kTraceId + "-" + kSpanId + "-01"));
+    ASSERT_TRUE(continued.trace_id() == kTraceId);
+    auto trace = continued.finish("POST /orders", std::chrono::system_clock::now(), 500.0);
+    ASSERT_TRUE(trace && (*trace)["trace_id"] == kTraceId);
+    ASSERT_TRUE(span_named(*trace, "POST /orders")["parent_span_id"] == kSpanId);
+
+    config.track_tracing = false;
+    forge_ops_tracker::SpanBuffer off(config);
+    ASSERT_TRUE(off.trace_id().size() == 32);
+    ASSERT_TRUE(!off.finish("x", std::chrono::system_clock::now(), 500.0).has_value());
+}
+
+TEST(trace_context_a_continued_trace_is_sent_under_the_callers_span_and_the_http_span_names_itself_in_the_header) {
+    TestServer server(202);
+    tracker_init_for(server, [](Configuration& c) { c.trace_capture_threshold = std::chrono::milliseconds(10); });
+
+    std::optional<std::string> header;
+    std::string http_id;
+    {
+        forge_ops_tracker::ScopedTrace trace("POST /orders", "00-" + kTraceId + "-" + kSpanId + "-01");
+        ASSERT_TRUE(forge_ops_tracker::current_trace_id() == std::optional<std::string>(kTraceId));
+        forge_ops_tracker::ScopedHttpSpan http("post", "https://Payments.example.com/charges/42?token=secret");
+        header = http.traceparent();
+        http_id = http.span_id();
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    }
+    ASSERT_TRUE(!forge_ops_tracker::current_trace_id());
+    ASSERT_TRUE(header == std::optional<std::string>("00-" + kTraceId + "-" + http_id + "-01"));
+
+    ASSERT_TRUE(server.wait_for_request_count(1));
+    nlohmann::json body = nlohmann::json::parse(request_body(server));
+    ASSERT_TRUE(body["trace_id"] == kTraceId);
+    auto root = span_named(body, "POST /orders");
+    auto http = span_named(body, "POST payments.example.com");
+    ASSERT_TRUE(root["parent_span_id"] == kSpanId);
+    ASSERT_TRUE(http["span_id"] == http_id);
+    ASSERT_TRUE(http["parent_span_id"] == root["span_id"]);
+    ASSERT_TRUE(http["kind"] == "http");
+    ASSERT_TRUE(request_body(server).find("secret") == std::string::npos);
+    forge_ops_tracker::reset_for_testing();
+}
+
+TEST(trace_context_a_missing_or_malformed_traceparent_starts_a_fresh_trace) {
+    TestServer server(202);
+    tracker_init_for(server);
+    forge_ops_tracker::trace("GET /x", std::string("00-nope"), [] {
+        auto id = forge_ops_tracker::current_trace_id();
+        if (!id || id->size() != 32 || *id == kTraceId) g_current_test_failed = true;
+        /* ignored inside an already-open trace */
+        forge_ops_tracker::ScopedTrace inner("inner", "00-" + kTraceId + "-" + kSpanId + "-01");
+        if (forge_ops_tracker::current_trace_id() == std::optional<std::string>(kTraceId)) g_current_test_failed = true;
+    });
+    ASSERT_TRUE(forge_ops_tracker::trace("GET /y", std::nullopt, [] { return forge_ops_tracker::current_trace_id()->size(); }) == 32);
+    forge_ops_tracker::reset_for_testing();
+}
+
+TEST(trace_context_no_header_outside_a_trace_off_target_or_with_propagation_off) {
+    TestServer server(202);
+    tracker_init_for(server, [](Configuration& c) {
+        c.trace_propagation_targets = std::vector<forge_ops_tracker::TracePropagationTarget>{"example.com"};
+    });
+
+    int value = forge_ops_tracker::http_span("GET", "https://api.example.com/", [](const std::optional<std::string>& traceparent) {
+        return traceparent ? 1 : 7;
+    });
+    ASSERT_TRUE(value == 7);
+    {
+        forge_ops_tracker::ScopedHttpSpan outside("GET", "https://api.example.com/");
+        ASSERT_TRUE(!outside.traceparent() && outside.span_id().empty());
+    }
+
+    {
+        forge_ops_tracker::ScopedTrace trace("GET /x");
+        forge_ops_tracker::ScopedHttpSpan off_target("GET", "https://badexample.com/");
+        ASSERT_TRUE(!off_target.traceparent() && !off_target.span_id().empty());
+        forge_ops_tracker::ScopedHttpSpan on_target("GET", "https://api.example.com/");
+        ASSERT_TRUE(on_target.traceparent().has_value());
+    }
+
+    forge_ops_tracker::init([](Configuration& c) {
+        c.trace_propagation_targets.reset();
+        c.propagate_traces = false;
+    });
+    {
+        forge_ops_tracker::ScopedTrace trace("GET /x");
+        forge_ops_tracker::ScopedHttpSpan off("GET", "https://api.example.com/");
+        ASSERT_TRUE(!off.traceparent());
+    }
+    forge_ops_tracker::reset_for_testing();
+}
+
+TEST(trace_context_an_error_captured_inside_a_trace_carries_its_id_even_with_track_tracing_off) {
+    TestServer server(202);
+    tracker_init_for(server, [](Configuration& c) { c.track_tracing = false; });
+    {
+        forge_ops_tracker::ScopedTrace trace("POST /orders", "00-" + kTraceId + "-" + kSpanId + "-01");
+        forge_ops_tracker::capture_exception(fot_test_exc::BoomError("boom"));
+    }
+    ASSERT_TRUE(server.wait_for_request_count(1));
+    ASSERT_TRUE(nlohmann::json::parse(request_body(server))["trace_id"] == kTraceId);
+
+    forge_ops_tracker::capture_exception(fot_test_exc::BoomError("outside"));
+    ASSERT_TRUE(server.wait_for_request_count(2));
+    ASSERT_TRUE(!nlohmann::json::parse(request_body(server)).contains("trace_id"));
+    forge_ops_tracker::reset_for_testing();
+}
+
+TEST(trace_context_event_builder_attaches_trace_id_unscrubbed_and_omits_it_otherwise) {
+    Configuration config;
+    EventBuilder builder(config);
+    nlohmann::json with, without;
+    try {
+        throw fot_test_exc::BoomError("boom");
+    } catch (const std::exception& e) {
+        with = builder.build(e, nlohmann::json::object(), nlohmann::json::object(), nlohmann::json::array(), "", kTraceId);
+        without = builder.build(e);
+    }
+    ASSERT_TRUE(with["trace_id"] == kTraceId);
+    ASSERT_TRUE(!without.contains("trace_id"));
+}
+
 /* ---- Custom metrics and infrastructure monitoring ------------------------------------------------- */
 
 static Configuration metrics_configuration(int port) {
@@ -1968,6 +2189,20 @@ int main() {
     RUN(tracing_trace_and_span_return_the_callables_value_and_a_span_outside_a_trace_just_runs);
     RUN(tracing_the_open_trace_is_per_thread);
     RUN(tracing_spans_uri_swaps_the_trailing_events_segment);
+
+    RUN(traceparent_parses_a_valid_version_00_header);
+    RUN(traceparent_rejects_anything_malformed);
+    RUN(traceparent_accepts_a_future_version_with_extra_fields);
+    RUN(traceparent_builds_a_sampled_version_00_header_and_ids_are_lowercase_hex_never_all_zeros);
+    RUN(traceparent_url_host_extracts_just_the_lowercased_host);
+    RUN(trace_propagation_goes_to_every_host_by_default_and_nowhere_when_off);
+    RUN(trace_propagation_targets_match_hosts_on_a_dot_boundary_and_search_regexes_in_the_host);
+    RUN(trace_context_span_buffer_continues_an_incoming_trace_and_never_sends_with_track_tracing_off);
+    RUN(trace_context_a_continued_trace_is_sent_under_the_callers_span_and_the_http_span_names_itself_in_the_header);
+    RUN(trace_context_a_missing_or_malformed_traceparent_starts_a_fresh_trace);
+    RUN(trace_context_no_header_outside_a_trace_off_target_or_with_propagation_off);
+    RUN(trace_context_an_error_captured_inside_a_trace_carries_its_id_even_with_track_tracing_off);
+    RUN(trace_context_event_builder_attaches_trace_id_unscrubbed_and_omits_it_otherwise);
 
 
     RUN(metrics_flush_delivers_every_entry_as_one_batch_to_custom_metrics_with_the_wire_shape);

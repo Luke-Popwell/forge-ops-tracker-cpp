@@ -1,0 +1,11 @@
+# Changelog
+
+## 0.4.0
+
+- Distributed tracing across services, using the W3C Trace Context standard (`traceparent`). `ScopedHttpSpan(method, url, data)` (or `http_span(method, url, f)`, which passes `f` the value) records an outgoing HTTP call as an `http` span named after the method and host, and hands back the `traceparent` header value to send with that request from `traceparent()` (a `std::optional<std::string>`); its parent id is the span's own id, so the called service's root span nests under it. `ScopedTrace(root_name, traceparent)` (or `trace(root_name, traceparent, f)`) continues an incoming request's trace (same trace id, root span parented under the caller's span); `std::nullopt` or a malformed value starts a fresh trace. New `Configuration::propagate_traces` (default true) and `Configuration::trace_propagation_targets` (default `std::nullopt`, meaning every host; or a list of `TracePropagationTarget`, each a host string matching that host and its subdomains or a `std::regex` searched for in the host) control where the header goes. `trace_parent::header` is the header's name.
+- Errors captured inside a trace now carry a top-level `trace_id`, so ForgeOps can link them to errors from other services that handled the same request: `capture_exception` and `capture_exception_with_sql`, and the terminate handler. `current_trace_id()` returns it. Errors captured outside a trace are unchanged. `EventBuilder::build` and `Reporter::report` take it as a new optional last argument.
+- With `track_tracing = false`, a `ScopedTrace` still starts a trace with an id (attached to errors and propagated in the header, since that is also what links errors across services); only span reporting stops. Previously nothing started with tracing off.
+- Trace and span ids were already W3C shaped (32 and 16 lowercase hex characters); they are now also guaranteed never to be all zeros, the one value the standard reserves as invalid.
+- `ScopedSpan::span_id()` returns the span's id (empty outside a trace).
+
+This SDK has earlier tagged releases on its mirror (v0.3.0 is the latest), but no `CHANGELOG.md` existed for it before this entry; it starts here rather than backfilling every earlier version. There is no version constant in the source or `CMakeLists.txt`: a release is its git tag, so this one is `v0.4.0`.

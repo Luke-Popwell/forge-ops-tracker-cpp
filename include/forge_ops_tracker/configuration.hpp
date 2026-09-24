@@ -3,10 +3,21 @@
 #include <chrono>
 #include <functional>
 #include <optional>
+#include <regex>
 #include <set>
 #include <string>
+#include <variant>
+#include <vector>
 
 namespace forge_ops_tracker {
+
+/**
+ * One entry in Configuration::trace_propagation_targets: a host string, matching that host and its
+ * subdomains on a dot boundary ignoring case and a leading dot ("example.com" matches
+ * "api.example.com", never "badexample.com"), or a std::regex searched for anywhere in the
+ * lowercased host (anchor it yourself). A string literal converts to the host form.
+ */
+using TracePropagationTarget = std::variant<std::string, std::regex>;
 
 /**
  * Holds a single ForgeOps DSN plus everything else the client needs to build and deliver events.
@@ -80,9 +91,11 @@ public:
     std::chrono::milliseconds performance_flush_interval{60000};
 
     /**
-     * Whether trace/ScopedTrace start a trace at all, and so whether spans are recorded and slow
-     * traces sent. On by default. This client has no web framework integration, so nothing starts a
-     * trace automatically: this gates the manual API.
+     * Whether a trace (ScopedTrace/trace()) is sent to ForgeOps when slow. On by default. With it
+     * off, a trace still starts and has an id, attached to errors captured inside it and handed out
+     * by ScopedHttpSpan (see propagate_traces), since that id is also what links an error here to one
+     * in another service; only span reporting stops. This client has no web framework integration,
+     * so nothing starts a trace automatically.
      */
     bool track_tracing = true;
 
@@ -97,6 +110,25 @@ public:
 
     /** A trace is only sent when its root span took at least this long. 1 second by default. */
     std::chrono::milliseconds trace_capture_threshold{1000};
+
+    /**
+     * Whether ScopedHttpSpan/http_span() hand back a W3C traceparent header for the outgoing call, so
+     * the service being called continues this trace. On by default, matching gems/forge_ops_tracker:
+     * the header carries the trace id that links an error here to an error there, which is useful
+     * with or without spans, so it goes out even with track_tracing off.
+     */
+    bool propagate_traces = true;
+
+    /**
+     * Which hosts get that header. nullopt (the default) means every host; otherwise a list of
+     * TracePropagationTarget (host strings and/or std::regex), and an empty list means no host.
+     * Useful for a third-party API that rejects unknown headers, or that shouldn't learn your trace
+     * ids at all.
+     */
+    std::optional<std::vector<TracePropagationTarget>> trace_propagation_targets;
+
+    /** Whether an outgoing call to `host` should carry a traceparent header; case-insensitive, since hostnames are. */
+    bool should_propagate_trace(const std::optional<std::string>& host) const;
 
     std::function<void(const std::string&)> logger;
 

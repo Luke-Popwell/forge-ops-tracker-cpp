@@ -1,6 +1,7 @@
 #pragma once
 
 #include <exception>
+#include <optional>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -40,11 +41,13 @@ public:
      * scrubbed, category/level/timestamp never are. `sql` is the raw statement behind the error when
      * the caller has one (see capture_exception_with_sql); a SqlException carries its own, found
      * automatically. Either way it's masked here before anything is attached: see sql_statement.hpp.
+     * `trace_id` is the id of the trace open when the error was captured (see ScopedTrace), attached
+     * under a top-level "trace_id" key (omitted entirely when nullopt) and never scrubbed.
      */
-    nlohmann::json build(const std::exception_ptr& exception_ptr, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object(), const nlohmann::json& breadcrumbs = nlohmann::json::array(), const std::string& sql = "");
+    nlohmann::json build(const std::exception_ptr& exception_ptr, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object(), const nlohmann::json& breadcrumbs = nlohmann::json::array(), const std::string& sql = "", const std::optional<std::string>& trace_id = std::nullopt);
 
     /** Convenience overload for the common case of already having caught a std::exception. */
-    nlohmann::json build(const std::exception& exception, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object(), const nlohmann::json& breadcrumbs = nlohmann::json::array(), const std::string& sql = "");
+    nlohmann::json build(const std::exception& exception, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object(), const nlohmann::json& breadcrumbs = nlohmann::json::array(), const std::string& sql = "", const std::optional<std::string>& trace_id = std::nullopt);
 
 private:
     const Configuration& configuration_;

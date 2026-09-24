@@ -5,32 +5,10 @@
 #include <cstdio>
 #include <ctime>
 #include <fstream>
-#include <random>
 
 namespace forge_ops_tracker {
 
 namespace {
-
-std::string random_hex(std::size_t bytes) {
-    // random_device can throw where no entropy source exists; an id only has to be unique within
-    // one project's traces, not unpredictable, so fall back to a clock-seeded engine.
-    std::mt19937_64 fallback(static_cast<std::uint64_t>(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
-    std::random_device device;
-    std::string out;
-    out.reserve(bytes * 2);
-    char buffer[3];
-    for (std::size_t i = 0; i < bytes; i++) {
-        unsigned value;
-        try {
-            value = device() & 0xff;
-        } catch (...) {
-            value = static_cast<unsigned>(fallback() & 0xff);
-        }
-        std::snprintf(buffer, sizeof(buffer), "%02x", value);
-        out += buffer;
-    }
-    return out;
-}
 
 // ISO 8601 with milliseconds, UTC. gmtime_r, not std::gmtime, for the same shared-buffer reason
 // add_breadcrumb documents.
@@ -63,15 +41,19 @@ const char* normalize_kind(const std::string& kind) {
 
 } // namespace
 
-SpanBuffer::SpanBuffer(const Configuration& configuration)
-    : configuration_(configuration), trace_id_(random_hex(16)), root_span_id_(random_hex(8)) {}
+SpanBuffer::SpanBuffer(const Configuration& configuration, std::optional<trace_parent::Context> incoming)
+    : configuration_(configuration),
+      trace_id_(incoming ? incoming->trace_id : trace_parent::generate_trace_id()),
+      root_span_id_(trace_parent::generate_span_id()),
+      remote_parent_span_id_(incoming ? std::optional<std::string>(incoming->parent_span_id) : std::nullopt),
+      send_(configuration.track_tracing) {}
 
 std::string SpanBuffer::current_parent() const {
     return open_.empty() ? root_span_id_ : open_.back();
 }
 
 std::string SpanBuffer::open() {
-    std::string id = random_hex(8);
+    std::string id = trace_parent::generate_span_id();
     open_.push_back(id);
     return id;
 }
@@ -92,7 +74,7 @@ void SpanBuffer::close(const std::string& id, const std::string& name, const std
 }
 
 void SpanBuffer::record_leaf(const std::string& name, const std::string& kind, std::chrono::system_clock::time_point started_at, double duration_ms, const nlohmann::json& data) {
-    record(random_hex(8), current_parent(), name, kind, started_at, duration_ms, data);
+    record(trace_parent::generate_span_id(), current_parent(), name, kind, started_at, duration_ms, data);
 }
 
 void SpanBuffer::record(const std::string& id, const std::string& parent, const std::string& name, const std::string& kind, std::chrono::system_clock::time_point started_at, double duration_ms, const nlohmann::json& data) {
@@ -118,12 +100,12 @@ nlohmann::json SpanBuffer::build(const std::string& id, const std::optional<std:
 }
 
 std::optional<nlohmann::json> SpanBuffer::finish(const std::string& root_name, std::chrono::system_clock::time_point started_at, double duration_ms) const {
-    if (duration_ms < static_cast<double>(configuration_.trace_capture_threshold.count())) {
+    if (!send_ || duration_ms < static_cast<double>(configuration_.trace_capture_threshold.count())) {
         return std::nullopt;
     }
 
     nlohmann::json spans = nlohmann::json::array();
-    spans.push_back(build(root_span_id_, std::nullopt, root_name, "controller", started_at, duration_ms, nlohmann::json::object()));
+    spans.push_back(build(root_span_id_, remote_parent_span_id_, root_name, "controller", started_at, duration_ms, nlohmann::json::object()));
     for (const auto& span : spans_) {
         spans.push_back(span);
     }

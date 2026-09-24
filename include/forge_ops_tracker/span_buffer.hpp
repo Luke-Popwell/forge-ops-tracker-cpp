@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "forge_ops_tracker/configuration.hpp"
+#include "forge_ops_tracker/trace_parent.hpp"
 
 namespace forge_ops_tracker {
 
@@ -23,12 +24,21 @@ namespace forge_ops_tracker {
  * decided in finish() once the root ends, so a fast request costs nothing on the wire. Kinds are the
  * closed set the ingestion API accepts (controller, service, database, redis, http, job, other):
  * anything else is sent as "other", since one bad kind would make the server reject the whole trace.
+ *
+ * `incoming` comes from an incoming traceparent header when this trace continues another service's
+ * (see trace_parent.hpp): the trace keeps that trace id, and the root span points at the caller's
+ * span, which the server nests it under even though it arrives in a different upload. Whether the
+ * spans are sent at all is Configuration::track_tracing as it was when the buffer was created: with
+ * it off the buffer still exists, for its trace id, but finish() always returns nullopt.
  */
 class SpanBuffer {
 public:
     static constexpr std::size_t max_spans = 500;
 
-    explicit SpanBuffer(const Configuration& configuration);
+    explicit SpanBuffer(const Configuration& configuration, std::optional<trace_parent::Context> incoming = std::nullopt);
+
+    /** This trace's id: 32 lowercase hex characters. */
+    const std::string& trace_id() const { return trace_id_; }
 
     /** Opens a span and returns its id; pair with close(). */
     std::string open();
@@ -39,7 +49,7 @@ public:
     /** Records an already-finished span as a child of whatever is currently open. */
     void record_leaf(const std::string& name, const std::string& kind, std::chrono::system_clock::time_point started_at, double duration_ms, const nlohmann::json& data);
 
-    /** The wire payload once the root has ended, or nullopt when it was faster than the threshold. */
+    /** The wire payload once the root has ended, or nullopt when it was faster than the threshold or track_tracing was off. */
     std::optional<nlohmann::json> finish(const std::string& root_name, std::chrono::system_clock::time_point started_at, double duration_ms) const;
 
     std::size_t span_count() const { return spans_.size(); }
@@ -48,6 +58,8 @@ private:
     const Configuration& configuration_;
     std::string trace_id_;
     std::string root_span_id_;
+    std::optional<std::string> remote_parent_span_id_;
+    bool send_;
     std::vector<nlohmann::json> spans_;
     std::vector<std::string> open_;
 

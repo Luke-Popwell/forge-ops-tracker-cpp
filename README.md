@@ -20,7 +20,7 @@ include(FetchContent)
 FetchContent_Declare(
   forge_ops_tracker
   GIT_REPOSITORY https://github.com/Luke-Popwell/forge-ops-tracker-cpp.git
-  GIT_TAG v0.3.0
+  GIT_TAG v0.4.0
 )
 FetchContent_MakeAvailable(forge_ops_tracker)
 target_link_libraries(your_app PRIVATE forge_ops_tracker)
@@ -227,7 +227,8 @@ A slow call's own breakdown: which database calls, HTTP calls, or pieces of your
 to, shown as a span tree on ForgeOps. Wrap the unit of work in a `ScopedTrace`, and anything inside
 it, on the same thread, can add spans; the trace is sent only when the whole thing took at least
 `Configuration::trace_capture_threshold` (1 second by default), so fast calls cost nothing on the
-wire. Traces are per service; nothing is propagated across services.
+wire. A trace can also be followed into the services you call and continued from the service that
+called you (see "Following a request across services" below).
 
 ```cpp
 {
@@ -253,7 +254,84 @@ it belongs to the thread that started it. A trace holds at most 500 spans.
 
 Delivery runs on one background `std::thread` fed by a bounded queue (`Configuration::queue_size`),
 started on the first finished slow trace and drained at normal exit; a full queue drops the trace
-rather than blocking the caller. Turn the feature off with `track_tracing = false`.
+rather than blocking the caller. Turn span reporting off with `track_tracing = false`.
+
+### Following a request across services
+
+Traces use the [W3C Trace Context](https://www.w3.org/TR/trace-context/) standard (a `traceparent`
+header), so an error or a slow call can be followed from one service into the next.
+
+**Outgoing**: wrap each HTTP call you make inside a trace in a `ScopedHttpSpan` (or `http_span()`).
+It records the call as an `http` span named after the method and host (never the path or query) and
+hands back the `traceparent` header value to send; its parent id is that span's own id, so the
+called service's spans nest under it:
+
+```cpp
+{
+    forge_ops_tracker::ScopedTrace trace("POST /checkout");
+
+    forge_ops_tracker::ScopedHttpSpan http("POST", url);
+    struct curl_slist* headers = nullptr;
+    if (http.traceparent()) {
+        headers = curl_slist_append(headers, ("traceparent: " + *http.traceparent()).c_str());
+    }
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    CURLcode result = curl_easy_perform(curl);
+    curl_slist_free_all(headers);
+}
+
+// Or with a callable, for any HTTP client:
+auto response = forge_ops_tracker::http_span("GET", url, [&](const std::optional<std::string>& traceparent) {
+    if (traceparent) request.set_header(forge_ops_tracker::trace_parent::header, *traceparent);
+    return client.send(request);
+});
+```
+
+`traceparent()` is `std::nullopt` outside a trace (where nothing is recorded either), with
+`propagate_traces = false`, or when the URL's host isn't in the propagation targets below. The span
+is recorded from the destructor, so a call that throws is still recorded. This client doesn't
+instrument libcurl or any other HTTP client itself, so a call made without an http span carries no
+header.
+
+**Incoming**: pass the request's own `traceparent` header to `ScopedTrace` (or `trace()`) and it
+continues the caller's trace (same trace id, root span parented under the caller's span).
+`std::nullopt` or a malformed value just starts a new trace:
+
+```cpp
+// However your server exposes the incoming request's headers, as a std::optional<std::string>:
+std::optional<std::string> traceparent = request.header("traceparent");
+{
+    forge_ops_tracker::ScopedTrace trace("POST /orders", traceparent);
+    handle(request);
+}
+```
+
+Every error captured inside a trace (`capture_exception` and friends, or the terminate handler on
+that thread) carries that trace's id (`forge_ops_tracker::current_trace_id()` returns it too, for your
+own logs), so ForgeOps can show it next to errors from the other services that handled the same
+request. Errors captured outside a trace are unchanged. The trace id and the header exist even with
+`track_tracing = false`, since they are also what links errors across services; only span reporting
+stops.
+
+The service on the other end must also report to ForgeOps (the Ruby SDK continues the trace
+automatically from 0.12.0), and both projects must be linked in ForgeOps to see them connected.
+
+Narrow or turn off where the header goes, for example if a third-party API rejects unknown headers:
+
+```cpp
+forge_ops_tracker::init([](forge_ops_tracker::Configuration& c) {
+    // std::nullopt (the default) means every host. A host string matches that host and its
+    // subdomains ("example.com" matches "api.example.com", never "badexample.com"); a std::regex
+    // is searched for anywhere in the host.
+    c.trace_propagation_targets = std::vector<forge_ops_tracker::TracePropagationTarget>{
+        "example.com",
+        std::regex(R"(^svc-\d+\.internal$)"),
+    };
+    // Or never send it at all (default true):
+    c.propagate_traces = false;
+});
+```
 
 ## Custom metrics and infrastructure monitoring
 
