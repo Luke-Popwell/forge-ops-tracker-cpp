@@ -21,6 +21,7 @@ std::unique_ptr<DeliveryQueue> g_delivery_queue;
 std::unique_ptr<Reporter> g_reporter;
 std::unique_ptr<PerformanceFlusher> g_performance_flusher;
 std::unique_ptr<SpanQueue> g_span_queue;
+std::unique_ptr<SpanQueue> g_change_queue;
 std::unique_ptr<MetricBuffer> g_metric_buffer;
 std::unique_ptr<MetricBuffer> g_infrastructure_metric_buffer;
 std::terminate_handler g_previous_terminate_handler = nullptr;
@@ -83,6 +84,14 @@ SpanQueue& span_queue() {
         g_span_queue = std::make_unique<SpanQueue>(configuration(), Client(configuration()));
     }
     return *g_span_queue;
+}
+
+SpanQueue& change_queue() {
+    if (!g_change_queue) {
+        g_change_queue = std::make_unique<SpanQueue>(configuration(), Client(configuration()),
+                                                     [](const Client& client, const nlohmann::json& change) { return client.deliver_change(change); });
+    }
+    return *g_change_queue;
 }
 
 void handle_terminate() {
@@ -200,6 +209,22 @@ void capture_infrastructure_metric(const std::string& name, double value, const 
         {"value", value},
         {"hostname", !hostname.empty() ? hostname : config.server_name.value_or("")},
     });
+}
+
+void record_change(const std::string& kind, const std::string& title, const nlohmann::json& details, const ChangeOptions& options) {
+    try {
+        const Configuration& config = configuration();
+        if (!config.is_enabled()) {
+            return;
+        }
+        if (auto change = build_change(config, kind, title, details, options)) {
+            change_queue().push(std::move(*change));
+        }
+    } catch (...) {
+        // An error reporter that throws into the code recording a change would be the worst outcome;
+        // nothing here is expected to throw, but nothing it could throw is allowed out either.
+        configuration().log("[forge-ops-tracker] record_change failed");
+    }
 }
 
 void flush_metrics() {
@@ -325,6 +350,10 @@ void reset_for_testing() {
     if (g_span_queue) {
         g_span_queue->discard();
         g_span_queue.reset();
+    }
+    if (g_change_queue) {
+        g_change_queue->discard();
+        g_change_queue.reset();
     }
     g_trace.reset();
     g_reporter.reset();

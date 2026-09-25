@@ -4,8 +4,10 @@
 
 namespace forge_ops_tracker {
 
-SpanQueue::SpanQueue(const Configuration& configuration, Client client)
-    : configuration_(configuration), client_(std::move(client)) {}
+SpanQueue::SpanQueue(const Configuration& configuration, Client client, Deliver deliver)
+    : configuration_(configuration),
+      client_(std::move(client)),
+      deliver_(deliver ? std::move(deliver) : Deliver([](const Client& c, const nlohmann::json& trace) { return c.deliver_spans(trace); })) {}
 
 SpanQueue::~SpanQueue() {
     {
@@ -34,7 +36,7 @@ bool SpanQueue::push(nlohmann::json trace) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (queue_.size() >= std::max<std::size_t>(1, configuration_.queue_size)) {
-            configuration_.log("[forge-ops-tracker] span queue full, dropping trace");
+            configuration_.log("[forge-ops-tracker] span queue full, dropping payload");
             return false;
         }
         queue_.push_back(std::move(trace));
@@ -70,7 +72,7 @@ void SpanQueue::run() {
         }
 
         try {
-            client_.deliver_spans(trace);
+            deliver_(client_, trace);
         } catch (...) {
             configuration_.log("[forge-ops-tracker] span worker caught an unexpected exception");
         }

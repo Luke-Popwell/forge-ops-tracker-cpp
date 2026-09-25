@@ -20,7 +20,7 @@ include(FetchContent)
 FetchContent_Declare(
   forge_ops_tracker
   GIT_REPOSITORY https://github.com/Luke-Popwell/forge-ops-tracker-cpp.git
-  GIT_TAG v0.4.0
+  GIT_TAG v0.5.0
 )
 FetchContent_MakeAvailable(forge_ops_tracker)
 target_link_libraries(your_app PRIVATE forge_ops_tracker)
@@ -362,6 +362,45 @@ succeeds, since a plan without the feature rejects every flush and would otherwi
 as the process lives. A NaN or infinite value is dropped at capture: `nlohmann::json` serializes it as
 `null`, which the server would reject along with the whole batch behind it. Requires a ForgeOps plan
 that includes custom metrics / infrastructure monitoring.
+
+## Recording changes
+
+Tell ForgeOps when something changed outside a release (a feature flag flipped, a config value
+changed, a firmware setting pushed to a device) so it shows up next to the errors and slowdowns that
+followed:
+
+```cpp
+#include <forge_ops_tracker/forge_ops_tracker.hpp>
+
+int main() {
+    forge_ops_tracker::init([](forge_ops_tracker::Configuration& config) {
+        config.dsn = "https://<api_key>@getforgeops.net/api/v1/events";
+        config.environment = "production";
+    });
+
+    forge_ops_tracker::record_change("feature_flag", "Enabled new checkout", {{"flag", "new_checkout"}, {"to", true}});
+
+    forge_ops_tracker::ChangeOptions options;
+    options.actor = "deploy-bot";
+    options.url = "https://example.com/pr/42";
+    forge_ops_tracker::record_change("config", "Raised the upload limit", nlohmann::json::object(), options);
+    return 0; // anything still queued is delivered as the process exits normally
+}
+```
+
+`kind` is one of `feature_flag`, `config`, `migration`, `dependency`, `infrastructure` or `other`
+(`forge_ops_tracker::change_kinds`); anything else is sent as `other`. The title is cut to 200
+characters (never through a multibyte UTF-8 character), and a blank one records nothing. `details` is
+sent when it is a non-empty JSON object. `ChangeOptions` is all optional: `environment` defaults to
+`Configuration::environment`, `occurred_at` to now, and `service`, `actor`, `url` and `id` (your own
+idempotency key, so a retried call records the change once) are left out when unset.
+
+Delivery runs on a background thread fed by the same kind of bounded queue traces use, so the call
+never blocks on the network, and the queue is drained when the process exits normally. It never
+throws: a full queue or a failed delivery (including the 403 a plan without change tracking returns)
+drops the change quietly. It is a no-op when reporting isn't enabled for the environment. This client
+runs on devices and embedded targets as well as servers, so it sends no automatic startup snapshot;
+every change is one you record.
 
 ## How delivery works: a bounded queue, drained by a background thread
 

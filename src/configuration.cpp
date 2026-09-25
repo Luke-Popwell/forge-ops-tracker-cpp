@@ -112,6 +112,10 @@ std::optional<std::string> Configuration::infrastructure_metrics_uri() const {
     return swap_events_suffix(ingestion_uri(), "/infrastructure_metrics");
 }
 
+std::optional<std::string> Configuration::changes_uri() const {
+    return swap_events_suffix(ingestion_uri(), "/changes");
+}
+
 std::optional<std::string> Configuration::spans_uri() const {
     auto uri = ingestion_uri();
     if (!uri) {

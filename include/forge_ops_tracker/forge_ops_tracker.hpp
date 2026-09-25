@@ -11,6 +11,8 @@
 
 #include "forge_ops_tracker/sql_statement.hpp"
 
+#include "forge_ops_tracker/change.hpp"
+
 #include "forge_ops_tracker/configuration.hpp"
 #include "forge_ops_tracker/span_buffer.hpp"
 #include "forge_ops_tracker/trace_parent.hpp"
@@ -150,6 +152,31 @@ void capture_infrastructure_metric(const std::string& name, double value, const 
 
 /** Delivers every buffered metric and infrastructure reading right now. Blocks on libcurl for up to Configuration::timeout_seconds. */
 void flush_metrics();
+
+/**
+ * Records one change you made (a feature flag flipped, a config value changed, a firmware setting
+ * pushed) so ForgeOps can show it next to the errors and slowdowns that followed it:
+ *
+ *     forge_ops_tracker::record_change("feature_flag", "Enabled new checkout", {{"flag", "new_checkout"}, {"to", true}});
+ *
+ *     forge_ops_tracker::ChangeOptions options;
+ *     options.actor = "deploy-bot";
+ *     options.url = "https://example.com/pr/42";
+ *     forge_ops_tracker::record_change("config", "Raised the upload limit", nlohmann::json::object(), options);
+ *
+ * `kind` is one of change_kinds (feature_flag, config, migration, dependency, infrastructure, other;
+ * anything else is sent as "other"). `title` is cut to 200 characters, and a blank one records
+ * nothing. `details` is sent when it is a non-empty JSON object. ChangeOptions holds the rest:
+ * environment (default Configuration::environment), service, actor, url, id (your own idempotency
+ * key, so a retried call records the change once) and occurred_at (default now).
+ *
+ * Queued for the same kind of background std::thread traces use, so this never blocks on the
+ * network, drained when the process exits normally; it never throws, and a full queue or a failed
+ * delivery (including the 403 a plan without change tracking returns) drops the change quietly. A
+ * no-op when reporting isn't enabled for this environment. This client sends no automatic startup
+ * snapshot: every change is one you record.
+ */
+void record_change(const std::string& kind, const std::string& title, const nlohmann::json& details = nlohmann::json::object(), const ChangeOptions& options = ChangeOptions());
 
 /**
  * Distributed tracing: one request's or job's own call tree, sent to ForgeOps only when the whole

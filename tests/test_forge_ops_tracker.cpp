@@ -2088,6 +2088,125 @@ TEST(sql_event_builder_sends_the_procedure_name_by_default_and_the_statement_onl
     ASSERT_TRUE(!payload.contains("sql_objects"));
 }
 
+/* ---- change tracking ------------------------------------------------------------------------- */
+
+TEST(changes_build_change_sends_the_documented_shape_with_every_optional_field) {
+    Configuration config;
+    config.environment = "production";
+    forge_ops_tracker::ChangeOptions options;
+    options.service = "firmware";
+    options.actor = "luke";
+    options.url = "https://example.com/flags/1";
+    options.id = "change-1";
+    options.occurred_at = std::chrono::system_clock::time_point(std::chrono::milliseconds(1790337600123LL));
+
+    auto change = forge_ops_tracker::build_change(config, "feature_flag", "Enabled new checkout", {{"flag", "new_checkout"}, {"to", true}}, options);
+    ASSERT_TRUE(change.has_value());
+    nlohmann::json expected = {
+        {"kind", "feature_flag"},
+        {"title", "Enabled new checkout"},
+        {"environment", "production"},
+        {"occurred_at", "2026-09-25T12:00:00.123Z"},
+        {"details", {{"flag", "new_checkout"}, {"to", true}}},
+        {"service", "firmware"},
+        {"actor", "luke"},
+        {"url", "https://example.com/flags/1"},
+        {"id", "change-1"},
+    };
+    ASSERT_TRUE(*change == expected);
+
+    forge_ops_tracker::ChangeOptions staging;
+    staging.environment = "staging";
+    ASSERT_TRUE((*forge_ops_tracker::build_change(config, "config", "x", nlohmann::json::object(), staging))["environment"] == "staging");
+}
+
+TEST(changes_build_change_defaults_environment_and_occurred_at_and_leaves_unset_keys_out) {
+    Configuration config;
+    config.environment = "production";
+    auto change = forge_ops_tracker::build_change(config, "config", "  Raised the upload limit\n", nlohmann::json::object(), {});
+    ASSERT_TRUE(change.has_value());
+    ASSERT_TRUE(change->size() == 4);
+    ASSERT_TRUE((*change)["title"] == "Raised the upload limit");
+    ASSERT_TRUE((*change)["environment"] == "production");
+    ASSERT_TRUE(std::regex_match((*change)["occurred_at"].get<std::string>(), std::regex(R"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z)")));
+
+    // Details that aren't a JSON object are left out rather than sent for the server to reject.
+    ASSERT_TRUE(!forge_ops_tracker::build_change(config, "config", "t", nlohmann::json::array({1}), {})->contains("details"));
+}
+
+TEST(changes_an_unknown_kind_is_sent_as_other_and_every_known_kind_is_kept) {
+    Configuration config;
+    for (const char* kind : forge_ops_tracker::change_kinds) {
+        ASSERT_TRUE((*forge_ops_tracker::build_change(config, kind, "t", nlohmann::json::object(), {}))["kind"] == kind);
+    }
+    ASSERT_TRUE((*forge_ops_tracker::build_change(config, "deploy", "t", nlohmann::json::object(), {}))["kind"] == "other");
+    ASSERT_TRUE((*forge_ops_tracker::build_change(config, "", "t", nlohmann::json::object(), {}))["kind"] == "other");
+}
+
+TEST(changes_a_long_title_is_cut_to_200_characters_never_mid_character_and_a_blank_one_builds_nothing) {
+    Configuration config;
+    std::string title = std::string(199, 'a') + "\xc3\xa9" + "bcd"; // 199 ASCII, then a two-byte e-acute as character 200
+    auto change = forge_ops_tracker::build_change(config, "other", title, nlohmann::json::object(), {});
+    ASSERT_TRUE((*change)["title"] == std::string(199, 'a') + "\xc3\xa9");
+    ASSERT_TRUE(!forge_ops_tracker::build_change(config, "other", "   ", nlohmann::json::object(), {}).has_value());
+}
+
+TEST(changes_record_change_delivers_to_the_changes_endpoint_with_the_bearer_key) {
+    TestServer server(202);
+    tracker_init_for(server);
+
+    forge_ops_tracker::ChangeOptions options;
+    options.actor = "luke";
+    forge_ops_tracker::record_change("migration", "Added the orders index", {{"version", "20260925"}}, options);
+
+    ASSERT_TRUE(server.wait_for_request_count(1));
+    ASSERT_TRUE(server.last_request().find("POST /api/v1/changes") == 0);
+    ASSERT_TRUE(server.last_request().find("Authorization: Bearer the-api-key") != std::string::npos);
+    nlohmann::json body = nlohmann::json::parse(request_body(server));
+    ASSERT_TRUE(body["kind"] == "migration");
+    ASSERT_TRUE(body["title"] == "Added the orders index");
+    ASSERT_TRUE(body["environment"] == "production");
+    ASSERT_TRUE(body["details"]["version"] == "20260925");
+    ASSERT_TRUE(body["actor"] == "luke");
+    forge_ops_tracker::reset_for_testing();
+}
+
+TEST(changes_record_change_is_a_no_op_when_reporting_is_not_enabled_for_this_environment) {
+    TestServer server(202);
+    tracker_init_for(server, [](Configuration& c) { c.environment = "development"; });
+
+    forge_ops_tracker::record_change("config", "Ignored");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    ASSERT_TRUE(server.request_count() == 0);
+    forge_ops_tracker::reset_for_testing();
+}
+
+TEST(changes_record_change_never_throws_on_a_403_or_an_unreachable_host_or_invalid_utf8) {
+    {
+        TestServer server(403);
+        tracker_init_for(server);
+        forge_ops_tracker::record_change("config", "Plan without change tracking");
+        ASSERT_TRUE(server.wait_for_request_count(1));
+    }
+
+    forge_ops_tracker::reset_for_testing();
+    forge_ops_tracker::init([](Configuration& c) {
+        c.dsn = "http://the-api-key@127.0.0.1:1/api/v1/events";
+        c.environment = "production";
+        c.timeout_seconds = 1;
+    });
+    forge_ops_tracker::record_change("config", "Nobody listening");
+    // Invalid UTF-8 only fails when the worker encodes it, which the worker catches.
+    forge_ops_tracker::record_change("config", "bad \xff byte");
+    forge_ops_tracker::reset_for_testing(); // joins the delivery thread: reaching here is the assertion
+}
+
+TEST(changes_uri_swaps_the_trailing_events_segment) {
+    Configuration config;
+    config.dsn = "https://key@tracker.example.com/api/v1/events";
+    ASSERT_TRUE(config.changes_uri() == std::optional<std::string>("https://tracker.example.com/api/v1/changes"));
+}
+
 int main() {
     RUN(configuration_defaults);
     RUN(configuration_api_key_and_ingestion_uri);
@@ -2215,6 +2334,15 @@ int main() {
     RUN(metrics_capture_metric_and_capture_infrastructure_metric_deliver_to_their_own_endpoints_through_the_full_stack);
     RUN(metrics_captures_are_a_no_op_when_reporting_is_not_enabled_for_this_environment);
     RUN(metrics_uris_swap_the_trailing_events_segment);
+
+    RUN(changes_build_change_sends_the_documented_shape_with_every_optional_field);
+    RUN(changes_build_change_defaults_environment_and_occurred_at_and_leaves_unset_keys_out);
+    RUN(changes_an_unknown_kind_is_sent_as_other_and_every_known_kind_is_kept);
+    RUN(changes_a_long_title_is_cut_to_200_characters_never_mid_character_and_a_blank_one_builds_nothing);
+    RUN(changes_record_change_delivers_to_the_changes_endpoint_with_the_bearer_key);
+    RUN(changes_record_change_is_a_no_op_when_reporting_is_not_enabled_for_this_environment);
+    RUN(changes_record_change_never_throws_on_a_403_or_an_unreachable_host_or_invalid_utf8);
+    RUN(changes_uri_swaps_the_trailing_events_segment);
 
     std::printf("\n%d run, %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed == 0 ? 0 : 1;

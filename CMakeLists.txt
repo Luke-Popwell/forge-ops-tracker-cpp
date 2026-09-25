@@ -41,6 +41,7 @@ add_library(forge_ops_tracker
     src/span_buffer.cpp
     src/metric_buffer.cpp
     src/span_queue.cpp
+    src/change.cpp
     src/forge_ops_tracker.cpp
 )
 target_include_directories(forge_ops_tracker PUBLIC include)

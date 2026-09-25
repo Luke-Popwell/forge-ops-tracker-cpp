@@ -36,6 +36,10 @@ bool Client::deliver_spans(const nlohmann::json& trace) const {
     return post(configuration_.spans_uri(), trace);
 }
 
+bool Client::deliver_change(const nlohmann::json& change) const {
+    return post(configuration_.changes_uri(), change);
+}
+
 bool Client::post(const std::optional<std::string>& uri, const nlohmann::json& payload) const {
     auto api_key = configuration_.api_key();
     if (!uri || !api_key) {

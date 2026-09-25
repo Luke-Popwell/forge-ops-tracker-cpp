@@ -148,6 +148,9 @@ public:
     std::optional<std::string> custom_metrics_uri() const;
     std::optional<std::string> infrastructure_metrics_uri() const;
 
+    /** Same derivation again, swapping the trailing "/events" for "/changes". */
+    std::optional<std::string> changes_uri() const;
+
     /** Same derivation again, swapping the trailing "/events" for "/spans". */
     std::optional<std::string> spans_uri() const;
 

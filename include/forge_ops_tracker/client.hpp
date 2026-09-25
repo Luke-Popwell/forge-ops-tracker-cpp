@@ -47,6 +47,13 @@ public:
      */
     bool deliver_spans(const nlohmann::json& trace) const;
 
+    /**
+     * Same delivery contract again, against the DSN's changes endpoint (see Configuration::changes_uri).
+     * `change` is sent as-is, the one change record_change built. A 403 (a plan without change
+     * tracking) is an ordinary non-2xx here: a quiet `false`.
+     */
+    bool deliver_change(const nlohmann::json& change) const;
+
 private:
     const Configuration& configuration_;
 
