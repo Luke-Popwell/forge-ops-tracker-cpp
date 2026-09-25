@@ -245,6 +245,24 @@ ScopedSpan::ScopedSpan(std::string name, std::string kind, nlohmann::json data)
     }
 }
 
+void ScopedSpan::set_statement(const std::string& statement, const std::optional<std::string>& db_system) {
+    if (kind_ != "database" || span_id_.empty()) {
+        return;
+    }
+    if (!data_.is_object()) {
+        data_ = nlohmann::json::object();
+    }
+    // Masked once, here, so the raw statement isn't kept until the span closes; SpanBuffer masks
+    // every database span's db.statement again as it builds the span, which leaves this unchanged.
+    auto masked = sql_statement::mask(statement);
+    if (masked) {
+        data_["db.statement"] = *masked;
+    }
+    if (db_system) {
+        data_["db.system"] = *db_system;
+    }
+}
+
 ScopedSpan::~ScopedSpan() {
     if (span_id_.empty() || !g_trace) {
         return;
@@ -323,6 +341,18 @@ void record_span(const std::string& name, const std::string& kind, std::chrono::
     if (g_trace) {
         g_trace->record_leaf(name, kind, started_at, duration_ms, data);
     }
+}
+
+void record_database_span(const std::string& name, std::chrono::system_clock::time_point started_at, double duration_ms, const std::string& statement, const std::optional<std::string>& db_system, const nlohmann::json& data) {
+    if (!g_trace) {
+        return;
+    }
+    nlohmann::json with_sql = data.is_object() ? data : nlohmann::json::object();
+    with_sql["db.statement"] = statement;
+    if (db_system) {
+        with_sql["db.system"] = *db_system;
+    }
+    g_trace->record_leaf(name, "database", started_at, duration_ms, with_sql);
 }
 
 void install_terminate_handler() {

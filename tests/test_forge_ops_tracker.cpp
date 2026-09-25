@@ -1455,6 +1455,60 @@ TEST(tracing_a_slow_scoped_trace_is_delivered_to_spans_with_nested_spans) {
     forge_ops_tracker::reset_for_testing();
 }
 
+TEST(tracing_a_database_span_sends_its_statement_masked_as_db_statement_with_db_system) {
+    TestServer server(202);
+    tracker_init_for(server, [](Configuration& c) { c.trace_capture_threshold = std::chrono::milliseconds(10); });
+
+    {
+        forge_ops_tracker::ScopedTrace trace("GET /orders");
+        {
+            forge_ops_tracker::ScopedSpan load("Load orders", "database", {{"rows", 3}});
+            load.set_statement("SELECT * FROM orders WHERE email = 'a@b.co' AND total > 4200", std::string(" SQLite "));
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        }
+        int rows = forge_ops_tracker::database_span("Wrapped", "SELECT name FROM saves WHERE slot = 2", std::string("sqlite"), [] { return 7; });
+        ASSERT_TRUE(rows == 7);
+        forge_ops_tracker::record_database_span("Recorded", std::chrono::system_clock::now(), 1.0, "DELETE FROM carts WHERE code = 'private-value'");
+        forge_ops_tracker::record_span("Direct", "database", std::chrono::system_clock::now(), 1.0,
+                                       {{"db.statement", "SELECT count(*) FROM carts WHERE code = 'another-value'"}, {"db.system", "PostgreSQL"}});
+        forge_ops_tracker::ScopedSpan other("Not db", "service");
+        other.set_statement("SELECT 'x'", std::string("sqlite"));
+    }
+
+    ASSERT_TRUE(server.wait_for_request_count(1));
+    std::string raw = request_body(server);
+    nlohmann::json body = nlohmann::json::parse(raw);
+    auto load = span_named(body, "Load orders")["data"];
+    ASSERT_TRUE(load["db.statement"] == "SELECT * FROM orders WHERE email = ? AND total > ?");
+    ASSERT_TRUE(load["db.system"] == "sqlite");
+    ASSERT_TRUE(load["rows"] == 3);
+    ASSERT_TRUE(span_named(body, "Wrapped")["data"]["db.statement"] == "SELECT name FROM saves WHERE slot = ?");
+    auto recorded = span_named(body, "Recorded")["data"];
+    ASSERT_TRUE(recorded["db.statement"] == "DELETE FROM carts WHERE code = ?");
+    ASSERT_TRUE(!recorded.contains("db.system"));
+    auto direct = span_named(body, "Direct")["data"];
+    ASSERT_TRUE(direct["db.statement"] == "SELECT count(*) FROM carts WHERE code = ?");
+    ASSERT_TRUE(direct["db.system"] == "postgresql");
+    ASSERT_TRUE(span_named(body, "Not db")["data"].empty());
+    ASSERT_TRUE(raw.find("a@b.co") == std::string::npos);
+    ASSERT_TRUE(raw.find("private-value") == std::string::npos);
+    ASSERT_TRUE(raw.find("another-value") == std::string::npos);
+    forge_ops_tracker::reset_for_testing();
+}
+
+TEST(tracing_a_database_statement_is_cut_at_4000_characters) {
+    std::string sql = "SELECT ";
+    for (int i = 0; i < 3000; i++) {
+        sql += "a, ";
+    }
+    sql += "b FROM t";
+    auto data = forge_ops_tracker::SpanBuffer::span_data("database", {{"db.statement", sql}});
+    std::string statement = data["db.statement"].get<std::string>();
+    ASSERT_TRUE(statement.size() == 4003);
+    ASSERT_TRUE(statement.compare(4000, 3, "...") == 0);
+    ASSERT_TRUE(forge_ops_tracker::SpanBuffer::span_data("service", {{"db.statement", "SELECT 'x'"}})["db.statement"] == "SELECT 'x'");
+}
+
 TEST(tracing_a_scope_that_throws_is_still_recorded_and_sent) {
     TestServer server(202);
     tracker_init_for(server, [](Configuration& c) { c.trace_capture_threshold = std::chrono::milliseconds(10); });
@@ -2301,6 +2355,8 @@ int main() {
     RUN(tracing_span_buffer_sends_an_unknown_kind_as_other_since_the_server_would_reject_the_whole_trace);
     RUN(tracing_span_buffer_drops_a_trace_under_the_threshold_and_caps_a_big_one_at_500_spans);
     RUN(tracing_a_slow_scoped_trace_is_delivered_to_spans_with_nested_spans);
+    RUN(tracing_a_database_span_sends_its_statement_masked_as_db_statement_with_db_system);
+    RUN(tracing_a_database_statement_is_cut_at_4000_characters);
     RUN(tracing_a_scope_that_throws_is_still_recorded_and_sent);
     RUN(tracing_a_fast_trace_sends_nothing);
     RUN(tracing_track_tracing_off_or_reporting_disabled_records_and_sends_nothing);

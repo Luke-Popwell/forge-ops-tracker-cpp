@@ -1,10 +1,13 @@
 #include "forge_ops_tracker/span_buffer.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
+
+#include "forge_ops_tracker/sql_statement.hpp"
 
 namespace forge_ops_tracker {
 
@@ -94,9 +97,42 @@ nlohmann::json SpanBuffer::build(const std::string& id, const std::optional<std:
         {"duration_ms", std::round(duration_ms * 100.0) / 100.0},
         {"environment", configuration_.environment},
         {"release", configuration_.release ? nlohmann::json(*configuration_.release) : nlohmann::json(nullptr)},
-        {"data", data.is_object() ? data : nlohmann::json::object()},
+        {"data", span_data(kind, data)},
     };
     return span;
+}
+
+nlohmann::json SpanBuffer::span_data(const std::string& kind, const nlohmann::json& data) {
+    if (!data.is_object()) {
+        return nlohmann::json::object();
+    }
+    if (kind != "database") {
+        return data;
+    }
+    nlohmann::json result = data;
+    auto statement = result.find("db.statement");
+    if (statement != result.end() && statement->is_string()) {
+        auto masked = sql_statement::mask(statement->get<std::string>());
+        if (masked) {
+            *statement = *masked;
+        } else {
+            result.erase(statement);
+        }
+    }
+    auto system = result.find("db.system");
+    if (system != result.end() && system->is_string()) {
+        std::string value = system->get<std::string>();
+        auto first = value.find_first_not_of(" \t\r\n");
+        auto last = value.find_last_not_of(" \t\r\n");
+        value = first == std::string::npos ? std::string() : value.substr(first, last - first + 1);
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (value.empty()) {
+            result.erase(system);
+        } else {
+            *system = value;
+        }
+    }
+    return result;
 }
 
 std::optional<nlohmann::json> SpanBuffer::finish(const std::string& root_name, std::chrono::system_clock::time_point started_at, double duration_ms) const {

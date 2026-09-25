@@ -20,7 +20,7 @@ include(FetchContent)
 FetchContent_Declare(
   forge_ops_tracker
   GIT_REPOSITORY https://github.com/Luke-Popwell/forge-ops-tracker-cpp.git
-  GIT_TAG v0.5.0
+  GIT_TAG v0.6.0
 )
 FetchContent_MakeAvailable(forge_ops_tracker)
 target_link_libraries(your_app PRIVATE forge_ops_tracker)
@@ -255,6 +255,31 @@ it belongs to the thread that started it. A trace holds at most 500 spans.
 Delivery runs on one background `std::thread` fed by a bounded queue (`Configuration::queue_size`),
 started on the first finished slow trace and drained at normal exit; a full queue drops the trace
 rather than blocking the caller. Turn span reporting off with `track_tracing = false`.
+
+### Database spans with their SQL
+
+A `database` span can carry the SQL it ran (a query against an embedded SQLite database, say) and
+which database it was. Every string and number literal is replaced by `?` before it leaves your
+process (so `WHERE email = 'a@b.co'` is sent as `WHERE email = ?`), the statement is cut at 4000
+characters, and ForgeOps masks it again on arrival. It is sent in the span's data as `db.statement`
+and `db.system`, and ForgeOps shows it on the span. Both are ignored on any other kind. This client
+doesn't instrument a database library itself, so pass the statement where you run the query:
+
+```cpp
+const std::string sql = "SELECT * FROM readings WHERE sensor_id = 42 AND label = 'boiler'";
+{
+    forge_ops_tracker::ScopedSpan query("Load readings", "database");
+    query.set_statement(sql, "sqlite");
+    sqlite3_exec(db, sql.c_str(), on_row, nullptr, nullptr);
+}
+// Sent as db.statement "SELECT * FROM readings WHERE sensor_id = ? AND label = ?", db.system "sqlite".
+
+// Or around a callable, or for a query you timed yourself:
+auto rows = forge_ops_tracker::database_span("Load readings", sql, "sqlite", [&] { return load(sql); });
+forge_ops_tracker::record_database_span("Load readings", started_at, duration_ms, sql, "sqlite");
+```
+
+A `db.statement` you put in the `data` of any `database` span is masked the same way.
 
 ### Following a request across services
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0 (2026-09-25)
+
+- A `database` span can now carry the SQL it ran, such as an embedded SQLite query: new `ScopedSpan::set_statement(statement, db_system)`, `database_span(name, statement, db_system, f)` and `record_database_span(name, started_at, duration_ms, statement, db_system, data)`. The statement is masked before it leaves the process (every string and number literal becomes `?`), cut at 4000 characters, and sent in the span's data as `db.statement`, with `db.system` lowercased. A `db.statement` put in the `data` of a `database` span directly is masked the same way. `set_statement` is ignored on spans of any other kind.
+
 ## 0.5.0 (2026-09-25)
 
 - Change tracking: `record_change(kind, title, details, options)` records one change you made (a feature flag flipped, a config value changed, a firmware setting pushed) so ForgeOps can show it next to the errors and slowdowns that followed. `details` is an optional JSON object; `ChangeOptions` holds `environment` (default `Configuration::environment`), `service`, `actor`, `url`, `id` (an idempotency key) and `occurred_at` (default now). `kind` is one of `feature_flag`, `config`, `migration`, `dependency`, `infrastructure` or `other` (`change_kinds`); anything else is sent as `other`. The title is cut to 200 characters, never through a multibyte UTF-8 character, and a blank one records nothing. Delivered on a background thread through the same bounded queue traces use (`SpanQueue` now takes the endpoint to deliver to), drained when the process exits normally, so the call never blocks on the network and never throws; a full queue or a failed delivery, including a 403 on a plan without change tracking, drops the change quietly. A no-op when reporting isn't enabled. This client sends no startup snapshot of its own.

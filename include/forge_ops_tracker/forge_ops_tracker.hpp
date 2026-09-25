@@ -217,6 +217,18 @@ public:
     /** This span's id (16 lowercase hex characters), or empty outside a trace. */
     const std::string& span_id() const { return span_id_; }
 
+    /**
+     * For a "database" span: the SQL it ran (a local SQLite query, say) and which database it was
+     * ("sqlite", "postgresql"). Sent in the span's data as "db.statement", with every string and
+     * number literal replaced by "?" first (so values never leave the process) and cut at 4000
+     * characters, and "db.system", lowercased. Ignored on a span of any other kind.
+     *
+     *     forge_ops_tracker::ScopedSpan query("Load orders", "database");
+     *     query.set_statement(sql, "sqlite");
+     *     db.exec(sql);
+     */
+    void set_statement(const std::string& statement, const std::optional<std::string>& db_system = std::nullopt);
+
 private:
     std::string name_;
     std::string kind_;
@@ -295,6 +307,12 @@ std::optional<std::string> current_trace_id();
 /** Records a span you timed yourself under the current one; a no-op outside a trace. */
 void record_span(const std::string& name, const std::string& kind, std::chrono::system_clock::time_point started_at, double duration_ms, const nlohmann::json& data = nlohmann::json::object());
 
+/**
+ * Records a "database" span you timed yourself, carrying the SQL it ran and which database it was,
+ * sent masked as described on ScopedSpan::set_statement; a no-op outside a trace.
+ */
+void record_database_span(const std::string& name, std::chrono::system_clock::time_point started_at, double duration_ms, const std::string& statement, const std::optional<std::string>& db_system = std::nullopt, const nlohmann::json& data = nlohmann::json::object());
+
 /** Runs `f` as a trace named `root_name` (see ScopedTrace) and returns whatever `f` returned. */
 template <typename F>
 auto trace(const std::string& root_name, F&& f) -> decltype(f()) {
@@ -328,6 +346,19 @@ auto http_span(const std::string& method, const std::string& url, F&& f) -> decl
 template <typename F>
 auto span(const std::string& name, const std::string& kind, F&& f) -> decltype(f()) {
     ScopedSpan scoped(name, kind);
+    return f();
+}
+
+/**
+ * Runs `f` as a "database" span carrying `statement` (see ScopedSpan::set_statement) and returns
+ * whatever `f` returned.
+ *
+ *     auto rows = forge_ops_tracker::database_span("Load orders", sql, "sqlite", [&] { return db.query(sql); });
+ */
+template <typename F>
+auto database_span(const std::string& name, const std::string& statement, const std::optional<std::string>& db_system, F&& f) -> decltype(f()) {
+    ScopedSpan scoped(name, "database");
+    scoped.set_statement(statement, db_system);
     return f();
 }
 
