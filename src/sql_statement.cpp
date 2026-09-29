@@ -30,26 +30,121 @@ std::string upper(std::string s) {
     return s;
 }
 
-// Where the number starting at `i` ends, or -1 when it isn't a standalone number (digits
-// immediately followed by a letter or underscore). A decimal that fails that check falls back to
-// just its integer part, the same way the shared pattern's backtracking does.
-long number_end(const std::string& s, std::size_t i) {
-    std::size_t k = i;
+bool is_hex_digit(unsigned char c) { return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+bool is_binary_digit(unsigned char c) { return c == '0' || c == '1'; }
+
+// Where the opening quote is when a string literal starts at `i`, or -1: the quote itself, or the
+// one right after an E, X, N, B or U& prefix. The prefix only counts when it isn't the end of a
+// longer word, but a quote always starts a string, so LIKE'%x%' is still masked (to LIKE?).
+long string_quote(const std::string& s, std::size_t i) {
+    if (s[i] == '\'') {
+        return static_cast<long>(i);
+    }
+    if (i > 0 && (is_word(s[i - 1]) || s[i - 1] == '$')) {
+        return -1;
+    }
+    std::size_t quote;
+    if (std::string_view("EeXxNnBb").find(s[i]) != std::string_view::npos) {
+        quote = i + 1;
+    } else if ((s[i] == 'U' || s[i] == 'u') && i + 1 < s.size() && s[i + 1] == '&') {
+        quote = i + 2;
+    } else {
+        return -1;
+    }
+    return quote < s.size() && s[quote] == '\'' ? static_cast<long>(quote) : -1;
+}
+
+// Where the text opened by the quote at `open` ends: a backslash escapes the next character and a
+// doubled quote is one quote. Without a closing quote (a string cut off by truncation, even right
+// after a backslash) it runs to the end of the statement.
+std::size_t quoted_end(const std::string& s, std::size_t open) {
+    const char quote = s[open];
+    std::size_t j = open + 1;
+    while (j < s.size()) {
+        if (s[j] == '\\') {
+            j += 2;
+        } else if (s[j] == quote) {
+            if (j + 1 >= s.size() || s[j + 1] != quote) {
+                return j + 1;
+            }
+            j += 2;
+        } else {
+            ++j;
+        }
+    }
+    return s.size();
+}
+
+std::size_t digits_end(const std::string& s, std::size_t k) {
     while (k < s.size() && is_digit(s[k])) {
         ++k;
     }
-    const std::size_t int_end = k;
-    if (k + 1 < s.size() && s[k] == '.' && is_digit(s[k + 1])) {
-        std::size_t m = k + 1;
-        while (m < s.size() && is_digit(s[m])) {
-            ++m;
+    return k;
+}
+
+// Where the fraction (.5) starting at `dot` ends, or -1 when there isn't one.
+long fraction_end(const std::string& s, std::size_t dot) {
+    if (dot + 1 < s.size() && s[dot] == '.' && is_digit(s[dot + 1])) {
+        return static_cast<long>(digits_end(s, dot + 1));
+    }
+    return -1;
+}
+
+// Where the exponent (e10, E-3, e+2) starting at `i` ends, or -1 when there isn't one.
+long exponent_end(const std::string& s, std::size_t i) {
+    if (i >= s.size() || (s[i] != 'e' && s[i] != 'E')) {
+        return -1;
+    }
+    std::size_t k = i + 1;
+    if (k < s.size() && (s[k] == '+' || s[k] == '-')) {
+        ++k;
+    }
+    const std::size_t end = digits_end(s, k);
+    return end > k ? static_cast<long>(end) : -1;
+}
+
+bool ends_here(const std::string& s, std::size_t k) { return k >= s.size() || !is_word(s[k]); }
+
+// Where the number starting at `i` ends, or -1 when it isn't a standalone number (immediately
+// followed by a letter, digit or underscore). Hex (0x1F) and binary (0b101) first, then a decimal
+// (42, 1.5, .5) with an optional exponent (3e10, 1.5E-3). One that fails that check falls back to
+// a shorter reading, the same way the shared pattern's backtracking does: 1.5x masks just the 1.
+long number_end(const std::string& s, std::size_t i) {
+    if (s[i] == '0' && i + 1 < s.size()) {
+        bool (*radix_digit)(unsigned char) = nullptr;
+        if (s[i + 1] == 'x' || s[i + 1] == 'X') {
+            radix_digit = is_hex_digit;
+        } else if (s[i + 1] == 'b' || s[i + 1] == 'B') {
+            radix_digit = is_binary_digit;
         }
-        if (m >= s.size() || !is_word(s[m])) {
-            return static_cast<long>(m);
+        if (radix_digit != nullptr) {
+            std::size_t k = i + 2;
+            while (k < s.size() && radix_digit(s[k])) {
+                ++k;
+            }
+            if (k > i + 2 && ends_here(s, k)) {
+                return static_cast<long>(k);
+            }
         }
     }
-    if (int_end >= s.size() || !is_word(s[int_end])) {
-        return static_cast<long>(int_end);
+
+    // Longest reading first: with the fraction, then without.
+    const std::size_t int_end = digits_end(s, i);
+    const long mantissas[2] = {
+        fraction_end(s, int_end > i ? int_end : i),
+        int_end > i ? static_cast<long>(int_end) : -1,
+    };
+    for (const long end : mantissas) {
+        if (end < 0) {
+            continue;
+        }
+        const long exponent = exponent_end(s, static_cast<std::size_t>(end));
+        if (exponent >= 0 && ends_here(s, static_cast<std::size_t>(exponent))) {
+            return exponent;
+        }
+        if (ends_here(s, static_cast<std::size_t>(end))) {
+            return end;
+        }
     }
     return -1;
 }
@@ -160,10 +255,12 @@ const std::string kCompilingMarker = "while compiling:";
 
 } // namespace
 
-std::optional<std::string> mask(const std::string& statement) {
+std::optional<std::string> mask(const std::string& statement, std::optional<std::string_view> system) {
     if (std::all_of(statement.begin(), statement.end(), [](unsigned char c) { return is_space(c); })) {
         return std::nullopt;
     }
+    const std::string db_system = system.has_value() ? lower(std::string(*system)) : std::string();
+    const bool double_quoted_strings = db_system == "mysql" || db_system == "mariadb";
 
     const std::string& s = statement;
     std::string out;
@@ -171,23 +268,17 @@ std::optional<std::string> mask(const std::string& statement) {
     std::size_t i = 0;
     while (i < s.size()) {
         const unsigned char c = s[i];
-        if (c == '\'') {
-            // A string literal; '' is an escaped quote. One cut off by truncation (no closing
-            // quote) is masked to the end of the statement, never left half-visible.
-            std::size_t j = i + 1;
-            while (j < s.size()) {
-                if (s[j] == '\'') {
-                    if (j + 1 < s.size() && s[j + 1] == '\'') {
-                        j += 2;
-                        continue;
-                    }
-                    ++j;
-                    break;
-                }
-                ++j;
-            }
+        // A string literal, with its E/X/N/B/U& prefix if it has one. '' is an escaped quote and so
+        // is \', and one cut off by truncation (no closing quote) is masked to the end of the
+        // statement, never left half-visible. In MySQL and MariaDB "double quoted" text is a
+        // string too.
+        long quote = string_quote(s, i);
+        if (quote < 0 && double_quoted_strings && c == '"') {
+            quote = static_cast<long>(i);
+        }
+        if (quote >= 0) {
             out += kMask;
-            i = j;
+            i = quoted_end(s, static_cast<std::size_t>(quote));
         } else if (c == '$') {
             // A dollar-quoted body ($tag$ ... $tag$): PostgreSQL function bodies and DO blocks.
             std::size_t j = i + 1;
@@ -203,7 +294,7 @@ std::optional<std::string> mask(const std::string& statement) {
                 out += static_cast<char>(c);
                 ++i;
             }
-        } else if (is_digit(c)) {
+        } else if (is_digit(c) || c == '.') {
             // A number, unless it's part of an identifier (orders2, sp_v2), a $1 placeholder, or
             // the fraction of another number; those digits are left alone.
             const bool part_of_something = i > 0 && (is_word(s[i - 1]) || s[i - 1] == '$' || s[i - 1] == '.');

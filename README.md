@@ -20,7 +20,7 @@ include(FetchContent)
 FetchContent_Declare(
   forge_ops_tracker
   GIT_REPOSITORY https://github.com/Luke-Popwell/forge-ops-tracker-cpp.git
-  GIT_TAG v0.6.0
+  GIT_TAG v0.7.0
 )
 FetchContent_MakeAvailable(forge_ops_tracker)
 target_link_libraries(your_app PRIVATE forge_ops_tracker)
@@ -279,7 +279,12 @@ auto rows = forge_ops_tracker::database_span("Load readings", sql, "sqlite", [&]
 forge_ops_tracker::record_database_span("Load readings", started_at, duration_ms, sql, "sqlite");
 ```
 
-A `db.statement` you put in the `data` of any `database` span is masked the same way.
+A `db.statement` you put in the `data` of any `database` span is masked the same way. Strings
+with backslash escapes (`'o\'brien'`) or a type prefix (`E''`, `X''`, `N''`, `B''`, `U&''`) and
+hex, binary and exponent numbers (`0x1F`, `0b101`, `1.5E-3`) are masked too, and with `db.system`
+`"mysql"` or `"mariadb"` so is "double quoted" text, a string there; on any other database it's a
+name and is left alone. `forge_ops_tracker::sql_statement::mask(statement, db_system)` is the
+masker itself, to see what a statement becomes.
 
 ### Following a request across services
 
@@ -559,7 +564,7 @@ moves on.
 The test suite covers every component with real assertions, including real local HTTP delivery
 (a small `TestServer` helper spins up a background-thread HTTP server on `127.0.0.1`, reading the
 *full* request before responding to avoid racing curl's own write) and a real bounded-queue drop
-test against a deliberately non-responding "black hole" listener. All 34 tests pass under both a
+test against a deliberately non-responding "black hole" listener. Every test passes under both a
 plain build and a build with AddressSanitizer + UndefinedBehaviorSanitizer
 (`-fsanitize=address,undefined`): zero sanitizer findings.
 

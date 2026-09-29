@@ -254,7 +254,15 @@ void ScopedSpan::set_statement(const std::string& statement, const std::optional
     }
     // Masked once, here, so the raw statement isn't kept until the span closes; SpanBuffer masks
     // every database span's db.statement again as it builds the span, which leaves this unchanged.
-    auto masked = sql_statement::mask(statement);
+    // Both use db.system as it goes out (trimmed), so a MySQL statement's "double quoted" strings
+    // are masked the same way each time.
+    std::optional<std::string> system = db_system;
+    if (system) {
+        const auto first = system->find_first_not_of(" \t\r\n");
+        const auto last = system->find_last_not_of(" \t\r\n");
+        *system = first == std::string::npos ? std::string() : system->substr(first, last - first + 1);
+    }
+    auto masked = sql_statement::mask(statement, system);
     if (masked) {
         data_["db.statement"] = *masked;
     }

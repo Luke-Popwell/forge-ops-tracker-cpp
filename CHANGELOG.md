@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.0 (2026-09-29)
+
+- SQL masking now catches values it used to let through, matching ForgeOps's own masker again: a string with a backslash-escaped quote (`'o\'brien'`, `E'o\'brien'`) is masked whole instead of leaving the rest of it visible, a string's type prefix goes with it (`E''`, `X''`, `N''`, `B''` and `U&''` each become one `?`), and hex (`0x1F`), binary (`0b101`), exponent (`3e10`, `1.5E-3`) and leading-dot (`.5`) numbers are masked. On a `database` span whose `db.system` is `mysql` or `mariadb`, "double quoted" text is a string and is masked too; on any other database it's a name and is still left alone. `sql_statement::mask(statement, system)` takes that system as a new optional second argument (default `std::nullopt`).
+
 ## 0.6.0 (2026-09-25)
 
 - A `database` span can now carry the SQL it ran, such as an embedded SQLite query: new `ScopedSpan::set_statement(statement, db_system)`, `database_span(name, statement, db_system, f)` and `record_database_span(name, started_at, duration_ms, statement, db_system, data)`. The statement is masked before it leaves the process (every string and number literal becomes `?`), cut at 4000 characters, and sent in the span's data as `db.statement`, with `db.system` lowercased. A `db.statement` put in the `data` of a `database` span directly is masked the same way. `set_statement` is ignored on spans of any other kind.

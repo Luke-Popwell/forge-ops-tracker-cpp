@@ -1496,6 +1496,34 @@ TEST(tracing_a_database_span_sends_its_statement_masked_as_db_statement_with_db_
     forge_ops_tracker::reset_for_testing();
 }
 
+TEST(tracing_a_mysql_or_mariadb_span_masks_double_quoted_strings_too) {
+    TestServer server(202);
+    tracker_init_for(server, [](Configuration& c) { c.trace_capture_threshold = std::chrono::milliseconds(10); });
+
+    {
+        forge_ops_tracker::ScopedTrace trace("GET /users");
+        {
+            forge_ops_tracker::ScopedSpan find("Find user", "database");
+            find.set_statement("SELECT \"a'b\" = 'c' AND token = \"tok-secret\"", std::string(" MySQL "));
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        }
+        forge_ops_tracker::record_span("Maria", "database", std::chrono::system_clock::now(), 1.0,
+                                       {{"db.statement", "UPDATE t SET v = \"maria-secret\""}, {"db.system", "MariaDB"}});
+        forge_ops_tracker::record_database_span("Pg", std::chrono::system_clock::now(), 1.0, "SELECT \"user id\" FROM t", std::string("postgresql"));
+    }
+
+    ASSERT_TRUE(server.wait_for_request_count(1));
+    std::string raw = request_body(server);
+    nlohmann::json body = nlohmann::json::parse(raw);
+    auto find = span_named(body, "Find user")["data"];
+    ASSERT_TRUE(find["db.statement"] == "SELECT ? = ? AND token = ?");
+    ASSERT_TRUE(find["db.system"] == "mysql");
+    ASSERT_TRUE(span_named(body, "Maria")["data"]["db.statement"] == "UPDATE t SET v = ?");
+    ASSERT_TRUE(span_named(body, "Pg")["data"]["db.statement"] == "SELECT \"user id\" FROM t");
+    ASSERT_TRUE(raw.find("secret") == std::string::npos);
+    forge_ops_tracker::reset_for_testing();
+}
+
 TEST(tracing_a_database_statement_is_cut_at_4000_characters) {
     std::string sql = "SELECT ";
     for (int i = 0; i < 3000; i++) {
@@ -2053,6 +2081,60 @@ TEST(sql_mask_is_idempotent_truncates_and_returns_nothing_for_blank) {
     ASSERT_TRUE(!mask("  ").has_value());
 }
 
+// The shared masking corpus: the same cases, with the same expected output, are checked in every
+// SDK and against the server's SqlStatementMasker.
+struct SqlMaskCase {
+    const char* input;
+    std::optional<std::string_view> system;
+    const char* expected;
+};
+
+static const SqlMaskCase kSqlMaskCorpus[] = {
+    {"SELECT * FROM orders WHERE email = 'a@b.co' AND id = 42 LIMIT 10", std::nullopt, "SELECT * FROM orders WHERE email = ? AND id = ? LIMIT ?"},
+    {"EXEC sp_note @text = 'it''s broken'", std::nullopt, "EXEC sp_note @text = ?"},
+    {"SELECT 1 WHERE name = 'unterminated", std::nullopt, "SELECT ? WHERE name = ?"},
+    {"DO $body$ BEGIN PERFORM 1; END $body$", std::nullopt, "DO ?"},
+    {"SELECT \"user id\" FROM orders2 WHERE id = $1 AND v = sp_v2(?)", std::nullopt, "SELECT \"user id\" FROM orders2 WHERE id = $1 AND v = sp_v2(?)"},
+    {"SELECT price * 1.5 FROM t", std::nullopt, "SELECT price * ? FROM t"},
+    {"SELECT * FROM users WHERE name = E'o\\'brien' AND id = 1", std::nullopt, "SELECT * FROM users WHERE name = ? AND id = ?"},
+    {"SELECT * FROM users WHERE name = 'o\\'brien' AND id = 1", std::nullopt, "SELECT * FROM users WHERE name = ? AND id = ?"},
+    {"SELECT * FROM t WHERE b = X'DEADBEEF' AND s = N'uni' AND u = U&'d\\0061t' AND e = e'x'", std::nullopt, "SELECT * FROM t WHERE b = ? AND s = ? AND u = ? AND e = ?"},
+    {"SELECT * FROM t WHERE a LIKE'%secret%'", std::nullopt, "SELECT * FROM t WHERE a LIKE?"},
+    {"SELECT * FROM t WHERE f = 0x1F AND b = 0b101 AND n = 3e10 AND m = 1.5E-3 AND k = .5", std::nullopt, "SELECT * FROM t WHERE f = ? AND b = ? AND n = ? AND m = ? AND k = ?"},
+    {"SELECT e, t.col, 1e5e FROM t", std::nullopt, "SELECT e, t.col, 1e5e FROM t"},
+    {"SELECT \"user id\" FROM t WHERE token = \"abc123secret\"", "mysql", "SELECT ? FROM t WHERE token = ?"},
+    {"SELECT \"user id\" FROM t WHERE token = \"abc123secret\"", "MariaDB", "SELECT ? FROM t WHERE token = ?"},
+    {"SELECT \"user id\" FROM t WHERE token = \"abc123secret\"", "postgresql", "SELECT \"user id\" FROM t WHERE token = \"abc123secret\""},
+    {"SELECT \"user id\" FROM t WHERE token = \"abc123secret\"", std::nullopt, "SELECT \"user id\" FROM t WHERE token = \"abc123secret\""},
+    {"SELECT * FROM t WHERE a = 'x' AND b = 9", std::nullopt, "SELECT * FROM t WHERE a = ? AND b = ?"},
+    {"SELECT * FROM t WHERE a = ? AND b = ?", std::nullopt, "SELECT * FROM t WHERE a = ? AND b = ?"},
+    {"SELECT * FROM t WHERE path = 'C:\\\\dir\\\\' AND n = 5", std::nullopt, "SELECT * FROM t WHERE path = ? AND n = ?"},
+    {"INSERT INTO t (a, b) VALUES (-5, +3.25e+2)", std::nullopt, "INSERT INTO t (a, b) VALUES (-?, +?)"},
+    {"SELECT * FROM t WHERE a = 'secret\\", std::nullopt, "SELECT * FROM t WHERE a = ?"},
+    {"SELECT * FROM t WHERE a = \"secret\\", "mysql", "SELECT * FROM t WHERE a = ?"},
+};
+
+TEST(sql_mask_matches_the_shared_corpus_exactly_and_is_idempotent_on_it) {
+    using forge_ops_tracker::sql_statement::mask;
+    for (const SqlMaskCase& c : kSqlMaskCorpus) {
+        auto masked = mask(c.input, c.system);
+        if (!masked || *masked != c.expected) {
+            std::printf("  mask(%s) = %s, expected %s\n", c.input, masked ? masked->c_str() : "(nullopt)", c.expected);
+        }
+        ASSERT_TRUE(masked && *masked == c.expected);
+        ASSERT_TRUE(*mask(c.expected, c.system) == c.expected);
+    }
+}
+
+TEST(sql_mask_only_masks_double_quotes_for_mysql_and_mariadb) {
+    using forge_ops_tracker::sql_statement::mask;
+    ASSERT_TRUE(*mask("SELECT \"a\" FROM t", "MYSQL") == "SELECT ? FROM t");
+    ASSERT_TRUE(*mask("SELECT \"a\" FROM t", std::string("mariadb")) == "SELECT ? FROM t");
+    ASSERT_TRUE(*mask("SELECT \"a\" FROM t", "sqlite") == "SELECT \"a\" FROM t");
+    ASSERT_TRUE(*mask("SELECT \"a\" FROM t") == "SELECT \"a\" FROM t");
+    ASSERT_TRUE(!mask(" ", "mysql").has_value());
+}
+
 TEST(sql_extract_finds_a_stored_procedure_with_its_schema) {
     using forge_ops_tracker::sql_statement::extract_objects;
     auto found = extract_objects("EXEC dbo.sp_refund_order @id = ?");
@@ -2344,6 +2426,8 @@ int main() {
     RUN(sql_mask_replaces_strings_and_numbers_but_not_identifiers_or_placeholders);
     RUN(sql_mask_handles_an_escaped_quote_a_cut_off_string_and_a_dollar_quoted_body);
     RUN(sql_mask_is_idempotent_truncates_and_returns_nothing_for_blank);
+    RUN(sql_mask_matches_the_shared_corpus_exactly_and_is_idempotent_on_it);
+    RUN(sql_mask_only_masks_double_quotes_for_mysql_and_mariadb);
     RUN(sql_extract_finds_a_stored_procedure_with_its_schema);
     RUN(sql_extract_finds_views_joined_tables_and_table_functions);
     RUN(sql_extract_does_not_misread_column_lists_builtins_or_from_inside_extract);
@@ -2356,6 +2440,7 @@ int main() {
     RUN(tracing_span_buffer_drops_a_trace_under_the_threshold_and_caps_a_big_one_at_500_spans);
     RUN(tracing_a_slow_scoped_trace_is_delivered_to_spans_with_nested_spans);
     RUN(tracing_a_database_span_sends_its_statement_masked_as_db_statement_with_db_system);
+    RUN(tracing_a_mysql_or_mariadb_span_masks_double_quoted_strings_too);
     RUN(tracing_a_database_statement_is_cut_at_4000_characters);
     RUN(tracing_a_scope_that_throws_is_still_recorded_and_sent);
     RUN(tracing_a_fast_trace_sends_nothing);

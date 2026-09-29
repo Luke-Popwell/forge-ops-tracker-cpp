@@ -57,8 +57,8 @@ public:
     /**
      * A span's data as it goes on the wire: on a "database" span, a string "db.statement" is masked
      * with sql_statement::mask (every string and number literal becomes "?", cut at 4000 characters)
-     * and a string "db.system" is lowercased, so raw SQL can never go out on a span; a blank one is
-     * left out. Any other kind's data is returned unchanged.
+     * for the span's db.system, and a string "db.system" is lowercased, so raw SQL can never go out
+     * on a span; a blank one is left out. Any other kind's data is returned unchanged.
      */
     static nlohmann::json span_data(const std::string& kind, const nlohmann::json& data);
 

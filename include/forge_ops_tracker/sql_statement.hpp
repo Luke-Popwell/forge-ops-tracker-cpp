@@ -3,6 +3,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include <nlohmann/json.hpp>
 
@@ -52,8 +53,12 @@ namespace sql_statement {
 
 constexpr std::size_t kMaxLength = 4000;
 
-/** Replaces every string literal and number with "?". nullopt for a blank statement. */
-std::optional<std::string> mask(const std::string& statement);
+/**
+ * Replaces every string literal and number with "?". nullopt for a blank statement. `system` is the
+ * database's db.system when known: for "mysql" or "mariadb" (any case), "double quoted" text is a
+ * string and is masked too; otherwise it's an identifier and is left alone.
+ */
+std::optional<std::string> mask(const std::string& statement, std::optional<std::string_view> system = std::nullopt);
 
 /**
  * Takes an already-masked statement (so a keyword inside a string value can't be mistaken for SQL)

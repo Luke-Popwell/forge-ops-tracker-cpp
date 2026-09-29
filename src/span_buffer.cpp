@@ -110,15 +110,7 @@ nlohmann::json SpanBuffer::span_data(const std::string& kind, const nlohmann::js
         return data;
     }
     nlohmann::json result = data;
-    auto statement = result.find("db.statement");
-    if (statement != result.end() && statement->is_string()) {
-        auto masked = sql_statement::mask(statement->get<std::string>());
-        if (masked) {
-            *statement = *masked;
-        } else {
-            result.erase(statement);
-        }
-    }
+    std::optional<std::string> db_system;
     auto system = result.find("db.system");
     if (system != result.end() && system->is_string()) {
         std::string value = system->get<std::string>();
@@ -130,6 +122,18 @@ nlohmann::json SpanBuffer::span_data(const std::string& kind, const nlohmann::js
             result.erase(system);
         } else {
             *system = value;
+            db_system = value;
+        }
+    }
+    // Masked for the db.system that goes out with it, so a MySQL or MariaDB statement's "double
+    // quoted" strings are masked too.
+    auto statement = result.find("db.statement");
+    if (statement != result.end() && statement->is_string()) {
+        auto masked = sql_statement::mask(statement->get<std::string>(), db_system);
+        if (masked) {
+            *statement = *masked;
+        } else {
+            result.erase(statement);
         }
     }
     return result;
