@@ -25,6 +25,7 @@ std::unique_ptr<SpanQueue> g_change_queue;
 std::unique_ptr<MetricBuffer> g_metric_buffer;
 std::unique_ptr<MetricBuffer> g_infrastructure_metric_buffer;
 std::terminate_handler g_previous_terminate_handler = nullptr;
+constexpr std::chrono::milliseconds kTerminateFlushTimeout{2000};
 bool g_terminate_handler_installed = false;
 
 // The user set via set_user, if any. See set_user's own header comment for why this is
@@ -106,6 +107,12 @@ void handle_terminate() {
         reporter().report(current, nlohmann::json::object(), g_current_user, g_current_breadcrumbs, "", open_trace_id());
     }
 
+    // std::abort() below runs no destructors, so the queue's own drain at normal exit never
+    // happens and the background thread dies with everything still queued, this crash included.
+    // Delivered here instead, on this thread, bounded so an unreachable ForgeOps can't hold up the
+    // crash for long.
+    flush_errors(kTerminateFlushTimeout);
+
     if (g_previous_terminate_handler) {
         g_previous_terminate_handler();
     }
@@ -135,6 +142,10 @@ void capture_exception(const std::exception& exception, const nlohmann::json& co
 
 void capture_exception_with_sql(const std::exception& exception, const std::string& sql, const nlohmann::json& context, const nlohmann::json& user) {
     reporter().report(exception, context, user.empty() ? g_current_user : user, g_current_breadcrumbs, sql, open_trace_id());
+}
+
+bool flush_errors(std::chrono::milliseconds timeout) {
+    return !g_delivery_queue || g_delivery_queue->drain(timeout);
 }
 
 void set_user(const nlohmann::json& user) {

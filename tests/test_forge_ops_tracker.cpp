@@ -13,9 +13,14 @@
  */
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+#include <csignal>
+#include <cstdlib>
 
 #include <atomic>
 #include <cctype>
@@ -1035,6 +1040,195 @@ TEST(tracker_install_terminate_handler_is_idempotent) {
      * tracker_install_handlers_is_idempotent test checks for its own installer. */
     forge_ops_tracker::install_terminate_handler();
     forge_ops_tracker::install_terminate_handler();
+}
+
+/* ---- Delivery on the way out: DeliveryQueue::drain, flush_errors, the terminate handler ------- */
+
+static std::string dsn_for_port(int port);
+
+/* A loopback port nothing listens on, so a connection to it is refused at once. */
+static int refused_port() {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    socklen_t len = sizeof(addr);
+    ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
+    ::close(fd);
+    return ntohs(addr.sin_port);
+}
+
+static long long elapsed_ms_since(std::chrono::steady_clock::time_point started_at) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started_at).count();
+}
+
+TEST(delivery_queue_drain_delivers_everything_queued_and_waits_for_the_worker) {
+    TestServer server(202);
+    Configuration config;
+    config.dsn = dsn_for(server);
+    DeliveryQueue queue(config, Client(config));
+
+    queue.push({{"n", 1}});
+    queue.push({{"n", 2}});
+    queue.push({{"n", 3}});
+
+    ASSERT_TRUE(queue.drain(std::chrono::seconds(2)));
+    ASSERT_TRUE(server.request_count() == 3);
+}
+
+TEST(delivery_queue_drain_gives_up_at_its_timeout_when_forge_ops_never_answers) {
+    TestServer server(-1); /* black hole: see TestServer */
+    Configuration config;
+    config.dsn = dsn_for(server);
+    config.timeout_seconds = 2;
+    DeliveryQueue queue(config, Client(config));
+
+    queue.push({{"n", 1}}); /* the worker takes this one and blocks on it */
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    queue.push({{"n", 2}}); /* this one the drain sends itself, into the same black hole */
+
+    auto started_at = std::chrono::steady_clock::now();
+    bool drained = queue.drain(std::chrono::milliseconds(300));
+    long long waited = elapsed_ms_since(started_at);
+
+    ASSERT_TRUE(!drained);
+    ASSERT_TRUE(waited >= 250);
+    ASSERT_TRUE(waited < 1000);
+}
+
+TEST(delivery_queue_drain_on_the_worker_thread_does_not_wait_on_itself) {
+    /* The logger runs on the worker thread when its delivery fails, which makes it a way to call
+     * drain() from inside the worker, the thread a crash in the worker would terminate on. Without
+     * the worker check, drain() would sit out its whole timeout waiting for the worker's own
+     * delivery to finish. */
+    Configuration config;
+    config.dsn = dsn_for_port(refused_port());
+    std::atomic<bool> drained_once{false};
+    std::atomic<bool> drained{false};
+    std::atomic<long long> waited{-1};
+    DeliveryQueue* queue_ptr = nullptr;
+    config.logger = [&](const std::string&) {
+        if (drained_once.exchange(true)) {
+            return;
+        }
+        auto started_at = std::chrono::steady_clock::now();
+        drained = queue_ptr->drain(std::chrono::seconds(2));
+        waited = elapsed_ms_since(started_at);
+    };
+    DeliveryQueue queue(config, Client(config));
+    queue_ptr = &queue;
+
+    queue.push({{"n", 1}});
+    queue.push({{"n", 2}});
+    queue.push({{"n", 3}});
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (waited.load() < 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(drained.load());
+    ASSERT_TRUE(waited.load() >= 0 && waited.load() < 1000);
+}
+
+TEST(tracker_flush_errors_delivers_a_capture_right_away_and_is_true_with_nothing_captured) {
+    TestServer server(202);
+    forge_ops_tracker::reset_for_testing();
+    ASSERT_TRUE(forge_ops_tracker::flush_errors(std::chrono::milliseconds(10)));
+
+    forge_ops_tracker::init([&server](Configuration& c) {
+        c.dsn = dsn_for(server);
+        c.environment = "production";
+    });
+    try {
+        throw fot_test_exc::BoomError("flushed");
+    } catch (const std::exception& e) {
+        forge_ops_tracker::capture_exception(e);
+    }
+
+    ASSERT_TRUE(forge_ops_tracker::flush_errors());
+    ASSERT_TRUE(server.request_count() == 1);
+    ASSERT_TRUE(server.last_request().find("flushed") != std::string::npos);
+
+    forge_ops_tracker::reset_for_testing();
+}
+
+/* The uncaught exception itself has to happen in a process of its own: it ends that process. This
+ * binary re-runs itself in "--terminate-child <mode> <port>" mode (see run_terminate_child below,
+ * which main hands off to), and these tests check how the child died and what the listener got. */
+static const char* g_self_path = nullptr;
+
+[[noreturn]] static void throw_uncaught(const std::string& message) {
+    throw fot_test_exc::BoomError(message);
+}
+
+static int run_terminate_child(const std::string& mode, int port) {
+    forge_ops_tracker::init([port](Configuration& c) {
+        c.dsn = dsn_for_port(port);
+        c.environment = "production";
+    });
+    forge_ops_tracker::install_terminate_handler();
+    if (mode == "thread") {
+        std::thread([] { throw_uncaught("uncaught on a thread"); }).join();
+    } else {
+        throw_uncaught("uncaught on main");
+    }
+    return 0;
+}
+
+struct ChildResult {
+    bool aborted = false;
+    long long elapsed_ms = 0;
+};
+
+static ChildResult run_crashing_child(const std::string& mode, int port) {
+    std::string port_text = std::to_string(port);
+    std::vector<char*> args = {const_cast<char*>(g_self_path), const_cast<char*>("--terminate-child"),
+                               const_cast<char*>(mode.c_str()), const_cast<char*>(port_text.c_str()), nullptr};
+    auto started_at = std::chrono::steady_clock::now();
+    pid_t pid = ::fork();
+    if (pid == 0) {
+        /* Straight to exec: only async-signal-safe calls between fork and exec in a process that
+         * has other threads running (the TestServer's). */
+        int devnull = ::open("/dev/null", O_WRONLY);
+        ::dup2(devnull, STDERR_FILENO); /* the default handler's "terminating due to uncaught exception" line */
+        ::execv(g_self_path, args.data());
+        ::_exit(127);
+    }
+    int status = 0;
+    ::waitpid(pid, &status, 0);
+    ChildResult result;
+    result.aborted = WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT;
+    result.elapsed_ms = elapsed_ms_since(started_at);
+    return result;
+}
+
+TEST(terminate_handler_delivers_an_uncaught_exception_before_the_process_aborts) {
+    TestServer server(202);
+    ChildResult result = run_crashing_child("main", server.port());
+
+    ASSERT_TRUE(result.aborted);
+    ASSERT_TRUE(server.request_count() == 1);
+    ASSERT_TRUE(server.last_request().find("uncaught on main") != std::string::npos);
+    ASSERT_TRUE(server.last_request().find("fot_test_exc::BoomError") != std::string::npos);
+}
+
+TEST(terminate_handler_delivers_an_uncaught_exception_from_another_thread) {
+    TestServer server(202);
+    ChildResult result = run_crashing_child("thread", server.port());
+
+    ASSERT_TRUE(result.aborted);
+    ASSERT_TRUE(server.request_count() == 1);
+    ASSERT_TRUE(server.last_request().find("uncaught on a thread") != std::string::npos);
+}
+
+TEST(terminate_handler_still_aborts_promptly_when_forge_ops_never_answers) {
+    TestServer server(-1); /* black hole */
+    ChildResult result = run_crashing_child("main", server.port());
+
+    ASSERT_TRUE(result.aborted);
+    ASSERT_TRUE(result.elapsed_ms < 5000);
 }
 
 /* ---- main ------------------------------------------------------------------------------------- */
@@ -2343,7 +2537,12 @@ TEST(changes_uri_swaps_the_trailing_events_segment) {
     ASSERT_TRUE(config.changes_uri() == std::optional<std::string>("https://tracker.example.com/api/v1/changes"));
 }
 
-int main() {
+int main(int argc, char** argv) {
+    g_self_path = argv[0];
+    if (argc == 4 && std::string(argv[1]) == "--terminate-child") {
+        return run_terminate_child(argv[2], std::atoi(argv[3]));
+    }
+
     RUN(configuration_defaults);
     RUN(configuration_api_key_and_ingestion_uri);
     RUN(configuration_api_key_percent_decodes);
@@ -2423,6 +2622,13 @@ int main() {
     RUN(tracker_scoped_transaction_records_even_when_the_scope_throws);
     RUN(tracker_track_performance_off_records_and_delivers_nothing);
     RUN(tracker_install_terminate_handler_is_idempotent);
+    RUN(delivery_queue_drain_delivers_everything_queued_and_waits_for_the_worker);
+    RUN(delivery_queue_drain_gives_up_at_its_timeout_when_forge_ops_never_answers);
+    RUN(delivery_queue_drain_on_the_worker_thread_does_not_wait_on_itself);
+    RUN(tracker_flush_errors_delivers_a_capture_right_away_and_is_true_with_nothing_captured);
+    RUN(terminate_handler_delivers_an_uncaught_exception_before_the_process_aborts);
+    RUN(terminate_handler_delivers_an_uncaught_exception_from_another_thread);
+    RUN(terminate_handler_still_aborts_promptly_when_forge_ops_never_answers);
     RUN(sql_mask_replaces_strings_and_numbers_but_not_identifiers_or_placeholders);
     RUN(sql_mask_handles_an_escaped_quote_a_cut_off_string_and_a_dollar_quoted_body);
     RUN(sql_mask_is_idempotent_truncates_and_returns_nothing_for_blank);

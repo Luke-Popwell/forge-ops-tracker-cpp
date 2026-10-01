@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -32,6 +34,20 @@ public:
 
     bool push(nlohmann::json payload);
 
+    /**
+     * Delivers whatever is still queued, on the calling thread, and waits for a delivery the
+     * worker thread already has under way, all within `timeout`. Returns true when everything
+     * went out in time. The process-exit counterpart to the destructor's unbounded drain, for a
+     * process about to die without running destructors: the terminate handler calls it before
+     * std::abort(), the way gems/forge_ops_tracker's DeliveryQueue#drain runs at exit.
+     *
+     * Safe to call from any thread, the worker thread included (it then doesn't wait on its own
+     * delivery). It never blocks on the queue's lock, only try_locks it, so a lock some other
+     * thread never releases makes it give up at the deadline rather than hang. Each delivery is cut
+     * short at the deadline too. Never throws.
+     */
+    bool drain(std::chrono::milliseconds timeout) noexcept;
+
 private:
     const Configuration& configuration_;
     Client client_;
@@ -42,6 +58,8 @@ private:
     std::thread worker_;
     bool worker_started_ = false;
     bool stopping_ = false;
+    // How many payloads the worker has taken off the queue but not finished delivering (0 or 1).
+    std::atomic<int> in_flight_{0};
 
     void ensure_worker_started();
     void run();

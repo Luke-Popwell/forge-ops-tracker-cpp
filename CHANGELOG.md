@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0 (2026-10-01)
+
+- An uncaught exception is now delivered before the process ends. The terminate handler queued the report and then called `std::abort()`, which runs no destructors, so the background thread died with the report still queued and the crash was never sent. The handler now delivers it, along with anything else still queued, on the terminating thread before chaining to the previous handler, waiting at most 2 seconds so an unreachable ForgeOps can't hold up the crash. This works when the exception escapes on any thread, the delivery thread included.
+- New `flush_errors(timeout)` (default 2 seconds) delivers every captured error still queued, on the calling thread, and returns `true` once everything went out in time or `false` when the timeout passed first. Call it before a way out that skips destructors (`std::quick_exit`, `std::_Exit`); a normal exit already delivers what's queued. It never throws. Built on the new `DeliveryQueue::drain(timeout)`, and `Client::deliver(payload, max_time)` caps one delivery at `max_time` when that's sooner than `Configuration::timeout_seconds`.
+- A logger that throws when the queue is full no longer leaves the queue's lock held.
+
 ## 0.7.0 (2026-09-29)
 
 - SQL masking now catches values it used to let through, matching ForgeOps's own masker again: a string with a backslash-escaped quote (`'o\'brien'`, `E'o\'brien'`) is masked whole instead of leaving the rest of it visible, a string's type prefix goes with it (`E''`, `X''`, `N''`, `B''` and `U&''` each become one `?`), and hex (`0x1F`), binary (`0b101`), exponent (`3e10`, `1.5E-3`) and leading-dot (`.5`) numbers are masked. On a `database` span whose `db.system` is `mysql` or `mariadb`, "double quoted" text is a string and is masked too; on any other database it's a name and is still left alone. `sql_statement::mask(statement, system)` takes that system as a new optional second argument (default `std::nullopt`).

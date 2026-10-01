@@ -20,7 +20,7 @@ include(FetchContent)
 FetchContent_Declare(
   forge_ops_tracker
   GIT_REPOSITORY https://github.com/Luke-Popwell/forge-ops-tracker-cpp.git
-  GIT_TAG v0.7.0
+  GIT_TAG v0.8.0
 )
 FetchContent_MakeAvailable(forge_ops_tracker)
 target_link_libraries(your_app PRIVATE forge_ops_tracker)
@@ -122,7 +122,26 @@ C++ ends up when an exception propagates past every handler: this installs a han
 reports whatever's in flight (via `std::current_exception()`) and then chains to whatever handler
 was previously installed (the default one, unless something else in your process also called
 `std::set_terminate`), so the process still terminates exactly as it would have without this
-client, just with a report sent first.
+client, just with a report sent first. The report is delivered on the terminating thread before the
+handler moves on, along with anything else still queued, and it waits at most 2 seconds for that, so
+an unreachable ForgeOps can't hold up the crash for long.
+
+Errors are delivered on a background thread. A normal exit (returning from `main`, `std::exit`)
+delivers whatever is still queued as the queue's global is destroyed. A way out that skips
+destructors (`std::quick_exit`, `std::_Exit`, `abort`) doesn't, so call `flush_errors()` first:
+
+```cpp
+try {
+    run_job();
+} catch (...) {
+    forge_ops_tracker::capture_exception(std::current_exception());
+    forge_ops_tracker::flush_errors(); // waits up to 2 seconds; flush_errors(std::chrono::milliseconds(500)) for less
+    std::_Exit(1);
+}
+```
+
+It returns `true` once everything went out in time, `false` when the timeout passed first, and
+never throws.
 
 You don't have to use the package-level `init`/`capture_exception` singleton at all: every piece
 (`Configuration`, `EventBuilder`, `DeliveryQueue`, `Client`, `Reporter`) is a real, independently
@@ -568,9 +587,11 @@ test against a deliberately non-responding "black hole" listener. Every test pas
 plain build and a build with AddressSanitizer + UndefinedBehaviorSanitizer
 (`-fsanitize=address,undefined`): zero sanitizer findings.
 
-The terminate handler's own body isn't exercised by this test suite beyond confirming installation
-is idempotent: deliberately: actually letting an exception escape uncaught to trigger it for real
-would terminate the test process itself.
+The terminate handler is exercised for real in a child process: the test binary re-runs itself in a
+mode that installs the handler and lets an exception escape uncaught (on the main thread, and on
+another thread), and the test checks that the child died of `SIGABRT` and that the report reached
+the local listener first, or that the child still died within a few seconds when the listener never
+answers.
 
 ### A real bug this test suite caught
 

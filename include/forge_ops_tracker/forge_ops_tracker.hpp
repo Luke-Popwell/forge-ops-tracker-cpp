@@ -41,6 +41,15 @@ void capture_exception(const std::exception& exception, const nlohmann::json& co
 void capture_exception_with_sql(const std::exception& exception, const std::string& sql, const nlohmann::json& context = nlohmann::json::object(), const nlohmann::json& user = nlohmann::json::object());
 
 /**
+ * Delivers every captured error still waiting on the background thread, on the calling thread,
+ * within `timeout`, and returns true when everything went out in time. A normal exit (returning
+ * from main, std::exit) already does this, unbounded, as the queue's global is destroyed; call it
+ * before a way out that skips destructors (std::quick_exit, std::_Exit, abort). The terminate
+ * handler calls it on its own. Never throws.
+ */
+bool flush_errors(std::chrono::milliseconds timeout = std::chrono::seconds(2));
+
+/**
  * Manually attaches an affected user to whatever gets reported from here on, *on this thread* (an
  * explicit capture_exception call with no `user` argument, or whatever the installed terminate
  * handler reports): there's no way to automatically detect "the current user" the way a
@@ -364,8 +373,10 @@ auto database_span(const std::string& name, const std::string& statement, const 
 
 /**
  * Installs a std::terminate handler that reports whatever's in flight (if it's a real exception,
- * see the .cpp for what "in flight" can mean when std::terminate is reached some other way) before
- * chaining to the previously-installed handler. std::terminate handlers are documented as not
+ * see the .cpp for what "in flight" can mean when std::terminate is reached some other way) and
+ * delivers it, along with anything else still queued, on the terminating thread within 2 seconds
+ * (flush_errors), before chaining to the previously-installed handler. Without that, std::abort()
+ * would end the process with the report still queued. std::terminate handlers are documented as not
  * being permitted to return, so this SDK cannot resume normal execution afterward any more than
  * the default handler could: the process will still terminate, the same way it would without
  * this installed; this only adds a report on the way out.

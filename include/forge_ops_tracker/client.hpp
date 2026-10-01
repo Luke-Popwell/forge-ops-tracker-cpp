@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <optional>
 #include <string>
 
@@ -24,6 +25,13 @@ public:
     explicit Client(const Configuration& configuration);
 
     bool deliver(const nlohmann::json& payload) const;
+
+    /**
+     * Same as deliver(), but the request gives up after `max_time` when that's sooner than
+     * Configuration::timeout_seconds. DeliveryQueue::drain uses it so a drain never outlasts its
+     * own deadline.
+     */
+    bool deliver(const nlohmann::json& payload, std::chrono::milliseconds max_time) const;
 
     /**
      * Same delivery contract as deliver(), against the DSN's performance_samples endpoint (see
@@ -57,7 +65,8 @@ public:
 private:
     const Configuration& configuration_;
 
-    bool post(const std::optional<std::string>& uri, const nlohmann::json& payload) const;
+    bool post(const std::optional<std::string>& uri, const nlohmann::json& payload,
+              std::optional<std::chrono::milliseconds> max_time = std::nullopt) const;
 };
 
 } // namespace forge_ops_tracker

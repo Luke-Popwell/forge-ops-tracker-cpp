@@ -1,5 +1,7 @@
 #include "forge_ops_tracker/client.hpp"
 
+#include <algorithm>
+
 #include <curl/curl.h>
 
 namespace forge_ops_tracker {
@@ -18,6 +20,10 @@ Client::Client(const Configuration& configuration) : configuration_(configuratio
 
 bool Client::deliver(const nlohmann::json& payload) const {
     return post(configuration_.ingestion_uri(), payload);
+}
+
+bool Client::deliver(const nlohmann::json& payload, std::chrono::milliseconds max_time) const {
+    return post(configuration_.ingestion_uri(), payload, max_time);
 }
 
 bool Client::deliver_performance_samples(const nlohmann::json& samples) const {
@@ -40,7 +46,8 @@ bool Client::deliver_change(const nlohmann::json& change) const {
     return post(configuration_.changes_uri(), change);
 }
 
-bool Client::post(const std::optional<std::string>& uri, const nlohmann::json& payload) const {
+bool Client::post(const std::optional<std::string>& uri, const nlohmann::json& payload,
+                  std::optional<std::chrono::milliseconds> max_time) const {
     auto api_key = configuration_.api_key();
     if (!uri || !api_key) {
         return false;
@@ -64,6 +71,13 @@ bool Client::post(const std::optional<std::string>& uri, const nlohmann::json& p
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(configuration_.timeout_seconds));
+    if (max_time) {
+        // A timeout_seconds of 0 means no limit to curl, so it's not a cap to compare against.
+        auto configured = std::chrono::milliseconds(std::chrono::seconds(configuration_.timeout_seconds));
+        auto cap = configuration_.timeout_seconds > 0 ? std::min(*max_time, configured) : *max_time;
+        // Set after CURLOPT_TIMEOUT, so this one wins: curl uses whichever of the two was set last.
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(std::max<long long>(1, cap.count())));
+    }
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discard_response_body);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L); // safe to use from a background thread: see DeliveryQueue
 
