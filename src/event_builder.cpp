@@ -69,9 +69,11 @@ std::string current_executable_name() {
 // symbol, "+ offset". Same shape backtrace_symbols() produces on both macOS and glibc-based Linux
 // (both ultimately implement the same de facto convention): verified directly against real
 // backtrace_symbols() output from a real caught exception before relying on it.
+// Leaked rather than a plain static, like configuration.cpp's dsn_pattern(): a capture on another
+// thread during exit must never find it destroyed.
 const std::regex& frame_pattern() {
-    static const std::regex pattern(R"(^\s*\d+\s+(\S+)\s+0x[0-9a-fA-F]+\s+(.+?)\s+\+\s+\d+\s*$)");
-    return pattern;
+    static const std::regex* const pattern = new std::regex(R"(^\s*\d+\s+(\S+)\s+0x[0-9a-fA-F]+\s+(.+?)\s+\+\s+\d+\s*$)");
+    return *pattern;
 }
 
 } // namespace

@@ -1,6 +1,7 @@
 #include "forge_ops_tracker/configuration.hpp"
 
 #include <cctype>
+#include <cstdlib>
 #include <regex>
 #include <sstream>
 
@@ -12,9 +13,28 @@ namespace {
 // parser in this repo handles, via std::regex (standard library, no extra dependency) rather than
 // a general-purpose URI parser: a DSN's shape is simple and fixed enough that this covers it
 // completely.
+//
+// Heap-allocated and never freed, on purpose: a function-local static is destroyed at exit in
+// reverse order of construction, and this one is built on the first DSN parse, after the globals
+// that own the delivery threads, so it used to be destroyed before them. A delivery still running
+// at exit then matched against a destroyed regex (a crash at the end of an ordinary `return 0`).
+// Leaking it keeps it valid for as long as any thread could still call it.
 const std::regex& dsn_pattern() {
-    static const std::regex pattern(R"(^(https?)://(?:([^:@/]*)@)?([^/]+)(/.*)?$)");
-    return pattern;
+    static const std::regex* const pattern = new std::regex(R"(^(https?)://(?:([^:@/]*)@)?([^/]+)(/.*)?$)");
+    return *pattern;
+}
+
+// The trailing segment every derived endpoint replaces. A plain literal, not a static std::string,
+// for the same reason dsn_pattern() leaks: nothing here may be destroyed while a thread can read it.
+constexpr const char kEventsSuffix[] = "/events";
+
+bool ends_with_events(const std::string& uri) {
+    const std::size_t length = sizeof(kEventsSuffix) - 1;
+    return uri.size() >= length && uri.compare(uri.size() - length, length, kEventsSuffix) == 0;
+}
+
+std::string without_events_suffix(const std::string& uri) {
+    return uri.substr(0, uri.size() - (sizeof(kEventsSuffix) - 1));
 }
 
 std::string percent_decode(const std::string& in) {
@@ -84,9 +104,8 @@ std::optional<std::string> Configuration::performance_samples_uri() const {
     if (!uri) {
         return std::nullopt;
     }
-    static const std::string suffix = "/events";
-    if (uri->size() >= suffix.size() && uri->compare(uri->size() - suffix.size(), suffix.size(), suffix) == 0) {
-        return uri->substr(0, uri->size() - suffix.size()) + "/performance_samples";
+    if (ends_with_events(*uri)) {
+        return without_events_suffix(*uri) + "/performance_samples";
     }
     return uri;
 }
@@ -96,9 +115,8 @@ std::optional<std::string> swap_events_suffix(const std::optional<std::string>& 
     if (!uri) {
         return std::nullopt;
     }
-    static const std::string suffix = "/events";
-    if (uri->size() >= suffix.size() && uri->compare(uri->size() - suffix.size(), suffix.size(), suffix) == 0) {
-        return uri->substr(0, uri->size() - suffix.size()) + replacement;
+    if (ends_with_events(*uri)) {
+        return without_events_suffix(*uri) + replacement;
     }
     return uri;
 }
@@ -121,9 +139,8 @@ std::optional<std::string> Configuration::spans_uri() const {
     if (!uri) {
         return std::nullopt;
     }
-    static const std::string suffix = "/events";
-    if (uri->size() >= suffix.size() && uri->compare(uri->size() - suffix.size(), suffix.size(), suffix) == 0) {
-        return uri->substr(0, uri->size() - suffix.size()) + "/spans";
+    if (ends_with_events(*uri)) {
+        return without_events_suffix(*uri) + "/spans";
     }
     return uri;
 }
@@ -136,6 +153,11 @@ bool Configuration::is_enabled() const {
         return false;
     }
     return enabled_environments.count(environment) > 0;
+}
+
+std::string Configuration::default_environment() {
+    const char* value = std::getenv("FORGE_OPS_ENVIRONMENT");
+    return value != nullptr && value[0] != '\0' ? std::string(value) : std::string("production");
 }
 
 void Configuration::log(const std::string& message) const {

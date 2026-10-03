@@ -6,12 +6,16 @@ DeliveryQueue::DeliveryQueue(const Configuration& configuration, Client client)
     : configuration_(configuration), client_(std::move(client)) {}
 
 DeliveryQueue::~DeliveryQueue() {
+    shutdown();
+}
+
+void DeliveryQueue::shutdown() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stopping_ = true;
     }
     condition_.notify_all();
-    if (worker_.joinable()) {
+    if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) {
         worker_.join();
     }
 }
@@ -93,7 +97,8 @@ bool DeliveryQueue::drain(std::chrono::milliseconds timeout) noexcept {
 
 void DeliveryQueue::ensure_worker_started() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (worker_started_) {
+    // Never after shutdown(): a thread started on the way out would outlive the exit hook.
+    if (worker_started_ || stopping_) {
         return;
     }
     worker_started_ = true;

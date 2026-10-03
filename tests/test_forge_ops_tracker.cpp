@@ -1231,6 +1231,192 @@ TEST(terminate_handler_still_aborts_promptly_when_forge_ops_never_answers) {
     ASSERT_TRUE(result.elapsed_ms < 5000);
 }
 
+/* ---- Normal exit: a handled capture followed by return 0 ---------------------------------------
+ * Also its own process, since what is under test is what happens after main returns: the static
+ * destructors and atexit hooks. The binary re-runs itself in "--exit-child <mode> <port>" mode
+ * (run_exit_child below) and these tests check its exit status, its output, and what the listener got. */
+
+static int run_exit_child(const std::string& mode, int port) {
+    if (mode == "return") {
+        forge_ops_tracker::init([port](Configuration& c) {
+            c.dsn = dsn_for_port(port);
+            c.environment = "production";
+        });
+        try {
+            throw fot_test_exc::BoomError("handled, then main returned");
+        } catch (const std::exception& e) {
+            forge_ops_tracker::capture_exception(e);
+        }
+        return 0;
+    }
+    if (mode == "return-without-init") {
+        /* Never calls init(): the configuration is reached lazily through capture_exception. */
+        forge_ops_tracker::reset_for_testing();
+        forge_ops_tracker::capture_exception(fot_test_exc::BoomError("lazily configured"));
+        return 0;
+    }
+    if (mode == "warn-stderr" || mode == "warn-logger") {
+        bool with_logger = mode == "warn-logger";
+        auto configure = [port, with_logger](Configuration& c) {
+            c.dsn = dsn_for_port(port);
+            c.environment = "development";
+            if (with_logger) {
+                c.logger = [](const std::string& message) { std::printf("LOGGER: %s\n", message.c_str()); };
+            }
+        };
+        forge_ops_tracker::init(configure);
+        forge_ops_tracker::init(configure); /* a second init must not warn again */
+        forge_ops_tracker::capture_exception(fot_test_exc::BoomError("not sent from development"));
+        return 0;
+    }
+    if (mode == "no-dsn" || mode == "staging") {
+        bool staging = mode == "staging";
+        forge_ops_tracker::init([port, staging](Configuration& c) {
+            if (staging) {
+                c.dsn = dsn_for_port(port);
+                c.environment = "staging";
+            } else {
+                c.dsn = std::nullopt;
+                c.environment = "development";
+            }
+        });
+        return 0;
+    }
+    return 2;
+}
+
+struct ExitedChild {
+    int status = -1;
+    std::string out;
+    std::string err;
+};
+
+static std::string read_all(int fd) {
+    std::string text;
+    char buf[4096];
+    ssize_t n;
+    while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
+        text.append(buf, static_cast<std::size_t>(n));
+    }
+    return text;
+}
+
+static ExitedChild run_exiting_child(const std::string& mode, int port, const char* environment_variable = nullptr) {
+    std::string port_text = std::to_string(port);
+    std::vector<char*> args = {const_cast<char*>(g_self_path), const_cast<char*>("--exit-child"),
+                               const_cast<char*>(mode.c_str()), const_cast<char*>(port_text.c_str()), nullptr};
+    int out_pipe[2];
+    int err_pipe[2];
+    ::pipe(out_pipe);
+    ::pipe(err_pipe);
+    pid_t pid = ::fork();
+    if (pid == 0) {
+        /* Only async-signal-safe calls between fork and exec (the TestServer's thread is running). */
+        ::dup2(out_pipe[1], STDOUT_FILENO);
+        ::dup2(err_pipe[1], STDERR_FILENO);
+        ::close(out_pipe[0]);
+        ::close(err_pipe[0]);
+        if (environment_variable != nullptr) {
+            ::putenv(const_cast<char*>(environment_variable));
+        } else {
+            ::unsetenv("FORGE_OPS_ENVIRONMENT");
+        }
+        ::execv(g_self_path, args.data());
+        ::_exit(127);
+    }
+    ::close(out_pipe[1]);
+    ::close(err_pipe[1]);
+    ExitedChild child;
+    child.out = read_all(out_pipe[0]);
+    child.err = read_all(err_pipe[0]);
+    ::close(out_pipe[0]);
+    ::close(err_pipe[0]);
+    ::waitpid(pid, &child.status, 0);
+    return child;
+}
+
+static bool exited_cleanly(const ExitedChild& child) {
+    return WIFEXITED(child.status) && WEXITSTATUS(child.status) == 0;
+}
+
+static int count_of(const std::string& haystack, const std::string& needle) {
+    int count = 0;
+    for (std::size_t at = haystack.find(needle); at != std::string::npos; at = haystack.find(needle, at + needle.size())) {
+        ++count;
+    }
+    return count;
+}
+
+static const std::string kNotSendingWarning =
+    "[ForgeOps] Not sending: this environment is \"development\", and only production, staging are enabled. "
+    "Set FORGE_OPS_ENVIRONMENT=production (or add \"development\" to the enabled environments) to send from here.";
+
+TEST(exit_a_handled_capture_then_return_0_exits_cleanly_and_delivers_the_event) {
+    TestServer server(202);
+    ExitedChild child = run_exiting_child("return", server.port());
+
+    ASSERT_TRUE(exited_cleanly(child)); /* was a SIGSEGV (exit 139) at static destruction */
+    ASSERT_TRUE(server.wait_for_request_count(1));
+    ASSERT_TRUE(server.last_request().find("handled, then main returned") != std::string::npos);
+}
+
+TEST(exit_a_capture_without_init_then_return_0_exits_cleanly) {
+    TestServer server(202);
+    ExitedChild child = run_exiting_child("return-without-init", server.port());
+
+    ASSERT_TRUE(exited_cleanly(child));
+    ASSERT_TRUE(server.request_count() == 0); /* no DSN: nothing to send, and nothing to crash on */
+}
+
+TEST(environment_comes_from_forge_ops_environment_else_production) {
+    TestServer server(202);
+    ExitedChild child = run_exiting_child("return-without-init", server.port(), "FORGE_OPS_ENVIRONMENT=staging");
+    ASSERT_TRUE(exited_cleanly(child));
+
+    const char* saved = std::getenv("FORGE_OPS_ENVIRONMENT");
+    std::string saved_copy = saved != nullptr ? saved : "";
+    ::setenv("FORGE_OPS_ENVIRONMENT", "staging", 1);
+    ASSERT_TRUE(Configuration().environment == "staging");
+    ::setenv("FORGE_OPS_ENVIRONMENT", "", 1);
+    ASSERT_TRUE(Configuration().environment == "production");
+    ::unsetenv("FORGE_OPS_ENVIRONMENT");
+    ASSERT_TRUE(Configuration().environment == "production");
+    if (saved != nullptr) {
+        ::setenv("FORGE_OPS_ENVIRONMENT", saved_copy.c_str(), 1);
+    }
+}
+
+TEST(environment_warning_goes_to_stderr_once_when_a_dsn_is_set_but_the_environment_does_not_send) {
+    TestServer server(202);
+    ExitedChild child = run_exiting_child("warn-stderr", server.port());
+
+    ASSERT_TRUE(exited_cleanly(child));
+    ASSERT_TRUE(count_of(child.err, "[ForgeOps]") == 1);
+    ASSERT_TRUE(child.err.find(kNotSendingWarning + "\n") != std::string::npos);
+    ASSERT_TRUE(server.request_count() == 0);
+}
+
+TEST(environment_warning_goes_through_the_logger_when_one_is_set) {
+    TestServer server(202);
+    ExitedChild child = run_exiting_child("warn-logger", server.port());
+
+    ASSERT_TRUE(exited_cleanly(child));
+    ASSERT_TRUE(count_of(child.out, "LOGGER: [ForgeOps]") == 1);
+    ASSERT_TRUE(child.out.find("LOGGER: " + kNotSendingWarning) != std::string::npos);
+    ASSERT_TRUE(child.err.find("[ForgeOps]") == std::string::npos);
+}
+
+TEST(environment_warning_never_appears_without_a_dsn_or_in_an_environment_that_sends) {
+    TestServer server(202);
+    ExitedChild no_dsn = run_exiting_child("no-dsn", server.port());
+    ASSERT_TRUE(exited_cleanly(no_dsn));
+    ASSERT_TRUE(no_dsn.err.find("[ForgeOps]") == std::string::npos);
+
+    ExitedChild staging = run_exiting_child("staging", server.port());
+    ASSERT_TRUE(exited_cleanly(staging));
+    ASSERT_TRUE(staging.err.find("[ForgeOps]") == std::string::npos);
+}
+
 /* ---- main ------------------------------------------------------------------------------------- */
 
 static std::string dsn_for_port(int port) {
@@ -2542,6 +2728,9 @@ int main(int argc, char** argv) {
     if (argc == 4 && std::string(argv[1]) == "--terminate-child") {
         return run_terminate_child(argv[2], std::atoi(argv[3]));
     }
+    if (argc == 4 && std::string(argv[1]) == "--exit-child") {
+        return run_exit_child(argv[2], std::atoi(argv[3]));
+    }
 
     RUN(configuration_defaults);
     RUN(configuration_api_key_and_ingestion_uri);
@@ -2629,6 +2818,12 @@ int main(int argc, char** argv) {
     RUN(terminate_handler_delivers_an_uncaught_exception_before_the_process_aborts);
     RUN(terminate_handler_delivers_an_uncaught_exception_from_another_thread);
     RUN(terminate_handler_still_aborts_promptly_when_forge_ops_never_answers);
+    RUN(exit_a_handled_capture_then_return_0_exits_cleanly_and_delivers_the_event);
+    RUN(exit_a_capture_without_init_then_return_0_exits_cleanly);
+    RUN(environment_comes_from_forge_ops_environment_else_production);
+    RUN(environment_warning_goes_to_stderr_once_when_a_dsn_is_set_but_the_environment_does_not_send);
+    RUN(environment_warning_goes_through_the_logger_when_one_is_set);
+    RUN(environment_warning_never_appears_without_a_dsn_or_in_an_environment_that_sends);
     RUN(sql_mask_replaces_strings_and_numbers_but_not_identifiers_or_placeholders);
     RUN(sql_mask_handles_an_escaped_quote_a_cut_off_string_and_a_dollar_quoted_body);
     RUN(sql_mask_is_idempotent_truncates_and_returns_nothing_for_blank);

@@ -10,12 +10,16 @@ SpanQueue::SpanQueue(const Configuration& configuration, Client client, Deliver 
       deliver_(deliver ? std::move(deliver) : Deliver([](const Client& c, const nlohmann::json& trace) { return c.deliver_spans(trace); })) {}
 
 SpanQueue::~SpanQueue() {
+    shutdown();
+}
+
+void SpanQueue::shutdown() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stopping_ = true;
     }
     condition_.notify_all();
-    if (worker_.joinable()) {
+    if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) {
         worker_.join();
     }
 }
@@ -48,7 +52,8 @@ bool SpanQueue::push(nlohmann::json trace) {
 
 void SpanQueue::ensure_worker_started() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (worker_started_) {
+    // Never after shutdown() or discard(): a thread started on the way out would outlive the exit hook.
+    if (worker_started_ || stopping_) {
         return;
     }
     worker_started_ = true;

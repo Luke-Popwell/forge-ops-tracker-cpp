@@ -48,6 +48,14 @@ public:
      */
     bool drain(std::chrono::milliseconds timeout) noexcept;
 
+    /**
+     * Stops the worker after it has delivered everything queued, and joins it: what the destructor
+     * does, callable earlier. The exit hook forge_ops_tracker::init registers calls it, so the
+     * worker is finished before static destruction starts tearing down what it uses. A push after
+     * this is kept but never delivered (no new thread starts). Safe to call more than once.
+     */
+    void shutdown();
+
 private:
     const Configuration& configuration_;
     Client client_;

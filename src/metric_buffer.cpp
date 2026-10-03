@@ -26,6 +26,10 @@ MetricBuffer::MetricBuffer(const Configuration& configuration, std::function<boo
     : configuration_(configuration), deliver_(std::move(deliver)), interval_(std::move(interval)) {}
 
 MetricBuffer::~MetricBuffer() {
+    shutdown();
+}
+
+void MetricBuffer::shutdown() {
     stop();
     bool discarded;
     {

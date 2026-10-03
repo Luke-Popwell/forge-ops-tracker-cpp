@@ -64,6 +64,9 @@ public:
     /** Stops the thread and drops everything buffered without delivering it. */
     void discard();
 
+    /** Stops and joins the thread, then delivers whatever is left unless discard() was called: the destructor's work, callable from the exit hook. Safe to call more than once. */
+    void shutdown();
+
     /** @internal not part of the public API: how many entries are currently buffered. */
     std::size_t size_for_testing();
 

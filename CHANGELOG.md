@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.0 (2026-10-02)
+
+- Fixed a crash at the end of an ordinary program: capturing a handled exception and then returning 0 from `main` could segfault (exit 139) and lose the event. At static destruction the error queue's global joined its delivery thread, which was still sending and parsing the DSN with a function-local `std::regex` that had already been destroyed. `init()` (and the first capture, for a program that never calls it) now registers an `atexit` hook that delivers what is queued and joins every background thread (errors, traces, changes, performance, metrics) before static destruction starts, and the regexes and lists those threads read are now never destroyed. New `shutdown()` on `DeliveryQueue`, `SpanQueue`, `MetricBuffer` and `PerformanceFlusher` is that hook's per-worker step.
+- **Behavior change:** `Configuration::environment` now starts as `FORGE_OPS_ENVIRONMENT` when that is set and not blank. Unset, it is still `"production"`. If that variable is set to something other than `production` or `staging` where this SDK runs, reporting from there stops until you change it or add it to `enabled_environments`. New `Configuration::default_environment()` returns that starting value.
+- With a DSN set and an environment that isn't enabled, `init()` now logs one line, once per process, through `config.logger` (stderr when no logger is set): `[ForgeOps] Not sending: this environment is "development", and only production, staging are enabled. Set FORGE_OPS_ENVIRONMENT=production (or add "development" to the enabled environments) to send from here.` Nothing is logged without a DSN.
+
 ## 0.8.0 (2026-10-01)
 
 - An uncaught exception is now delivered before the process ends. The terminate handler queued the report and then called `std::abort()`, which runs no destructors, so the background thread died with the report still queued and the crash was never sent. The handler now delivers it, along with anything else still queued, on the terminating thread before chaining to the previous handler, waiting at most 2 seconds so an unreachable ForgeOps can't hold up the crash. This works when the exception escapes on any thread, the delivery thread included.

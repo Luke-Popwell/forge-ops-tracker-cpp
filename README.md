@@ -20,7 +20,7 @@ include(FetchContent)
 FetchContent_Declare(
   forge_ops_tracker
   GIT_REPOSITORY https://github.com/Luke-Popwell/forge-ops-tracker-cpp.git
-  GIT_TAG v0.8.0
+  GIT_TAG v0.9.0
 )
 FetchContent_MakeAvailable(forge_ops_tracker)
 target_link_libraries(your_app PRIVATE forge_ops_tracker)
@@ -92,6 +92,15 @@ forge_ops_tracker::init([](forge_ops_tracker::Configuration& config) {
 `init()` returns a mutable `Configuration&` you can also hold onto and mutate later. Call it once
 at startup, before installing the terminate handler or reporting anything.
 
+`environment` starts as `FORGE_OPS_ENVIRONMENT` when that is set, else `"production"`. Only
+`production` and `staging` send by default (`enabled_environments`). With a DSN set and any other
+environment, `init()` logs one line, once per process, through `config.logger` (or stderr when no
+logger is set), and nothing is sent:
+
+```
+[ForgeOps] Not sending: this environment is "development", and only production, staging are enabled. Set FORGE_OPS_ENVIRONMENT=production (or add "development" to the enabled environments) to send from here.
+```
+
 ## Usage
 
 **Report an exception you've already caught**: the common case, and the one every convenience
@@ -127,8 +136,9 @@ handler moves on, along with anything else still queued, and it waits at most 2 
 an unreachable ForgeOps can't hold up the crash for long.
 
 Errors are delivered on a background thread. A normal exit (returning from `main`, `std::exit`)
-delivers whatever is still queued as the queue's global is destroyed. A way out that skips
-destructors (`std::quick_exit`, `std::_Exit`, `abort`) doesn't, so call `flush_errors()` first:
+delivers whatever is still queued from an `atexit` hook that `init()` registers, which finishes every
+delivery thread before static destruction begins. A way out that skips `atexit` hooks
+(`std::quick_exit`, `std::_Exit`, `abort`) doesn't, so call `flush_errors()` first:
 
 ```cpp
 try {

@@ -57,6 +57,9 @@ public:
     /** Stops the thread and drops every bucket without delivering anything. */
     void discard();
 
+    /** Stops and joins the thread, then delivers whatever is left unless discard() was called: the destructor's work, callable from the exit hook. Safe to call more than once. */
+    void shutdown();
+
     struct Tally {
         unsigned long count = 0;
         double duration_sum_ms = 0;

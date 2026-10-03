@@ -1,9 +1,12 @@
 #include "forge_ops_tracker/forge_ops_tracker.hpp"
 
+#include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <memory>
+#include <mutex>
 
 #include "forge_ops_tracker/client.hpp"
 #include "forge_ops_tracker/delivery_queue.hpp"
@@ -27,6 +30,8 @@ std::unique_ptr<MetricBuffer> g_infrastructure_metric_buffer;
 std::terminate_handler g_previous_terminate_handler = nullptr;
 constexpr std::chrono::milliseconds kTerminateFlushTimeout{2000};
 bool g_terminate_handler_installed = false;
+std::once_flag g_exit_hook_registered;
+std::atomic<bool> g_environment_warning_given{false};
 
 // The user set via set_user, if any. See set_user's own header comment for why this is
 // thread_local rather than a plain global.
@@ -48,8 +53,70 @@ Configuration& configuration() {
     return *g_configuration;
 }
 
+// Runs at a normal exit (return from main, std::exit), before static destruction: finishes every
+// background delivery thread while everything it touches still exists. An atexit handler runs
+// before the destructors of statics constructed before it was registered, and the g_* globals
+// above are constant-initialized before main, so they always outlive this. Without it, those
+// globals' destructors joined their threads only at static destruction, after function-local
+// statics built later (the DSN regex, before it was made immortal) were already gone, and a
+// delivery still in flight crashed the process after an ordinary `return 0`.
+void finish_deliveries_at_exit() noexcept {
+    try {
+        if (g_performance_flusher) {
+            g_performance_flusher->shutdown();
+        }
+        if (g_metric_buffer) {
+            g_metric_buffer->shutdown();
+            g_infrastructure_metric_buffer->shutdown();
+        }
+        if (g_span_queue) {
+            g_span_queue->shutdown();
+        }
+        if (g_change_queue) {
+            g_change_queue->shutdown();
+        }
+        if (g_delivery_queue) {
+            g_delivery_queue->shutdown();
+        }
+    } catch (...) {
+        // Nothing may escape an atexit handler.
+    }
+}
+
+// Registered by init() and by every lazily created worker, so a program that never calls init()
+// (configuring through the returned reference elsewhere, say) is covered too.
+void ensure_exit_hook() {
+    std::call_once(g_exit_hook_registered, [] { std::atexit(&finish_deliveries_at_exit); });
+}
+
+// Once per process: with a DSN set and an environment that doesn't send, every capture is silently
+// dropped, which otherwise looks exactly like a broken setup. Through the configured logger, or on
+// stderr when there is none.
+void warn_once_if_environment_is_not_enabled(const Configuration& config) {
+    if (!config.dsn || config.dsn->empty() || config.enabled_environments.count(config.environment) > 0) {
+        return;
+    }
+    if (g_environment_warning_given.exchange(true)) {
+        return;
+    }
+    std::string enabled;
+    for (const auto& name : config.enabled_environments) {
+        enabled += (enabled.empty() ? "" : ", ") + name;
+    }
+    std::string message = "[ForgeOps] Not sending: this environment is \"" + config.environment + "\", and only " + enabled +
+                          " are enabled. Set FORGE_OPS_ENVIRONMENT=production (or add \"" + config.environment +
+                          "\" to the enabled environments) to send from here.";
+    if (config.logger) {
+        config.log(message);
+    } else {
+        std::fprintf(stderr, "%s\n", message.c_str());
+    }
+}
+
 Reporter& reporter() {
     if (!g_reporter) {
+        ensure_exit_hook();
+        warn_once_if_environment_is_not_enabled(configuration());
         g_delivery_queue = std::make_unique<DeliveryQueue>(configuration(), Client(configuration()));
         g_reporter = std::make_unique<Reporter>(configuration(), EventBuilder(configuration()), *g_delivery_queue);
     }
@@ -58,6 +125,7 @@ Reporter& reporter() {
 
 PerformanceFlusher& performance_flusher() {
     if (!g_performance_flusher) {
+        ensure_exit_hook();
         g_performance_flusher = std::make_unique<PerformanceFlusher>(configuration(), Client(configuration()));
     }
     return *g_performance_flusher;
@@ -65,6 +133,7 @@ PerformanceFlusher& performance_flusher() {
 
 void ensure_metric_buffers() {
     if (!g_metric_buffer) {
+        ensure_exit_hook();
         Configuration& config = configuration();
         auto client = std::make_shared<Client>(config);
         g_metric_buffer = std::make_unique<MetricBuffer>(
@@ -82,6 +151,7 @@ std::optional<std::string> open_trace_id() {
 
 SpanQueue& span_queue() {
     if (!g_span_queue) {
+        ensure_exit_hook();
         g_span_queue = std::make_unique<SpanQueue>(configuration(), Client(configuration()));
     }
     return *g_span_queue;
@@ -89,6 +159,7 @@ SpanQueue& span_queue() {
 
 SpanQueue& change_queue() {
     if (!g_change_queue) {
+        ensure_exit_hook();
         g_change_queue = std::make_unique<SpanQueue>(configuration(), Client(configuration()),
                                                      [](const Client& client, const nlohmann::json& change) { return client.deliver_change(change); });
     }
@@ -129,6 +200,8 @@ Configuration& init(const std::function<void(Configuration&)>& configure) {
     if (configure) {
         configure(config);
     }
+    ensure_exit_hook();
+    warn_once_if_environment_is_not_enabled(config);
     return config;
 }
 
@@ -410,6 +483,7 @@ void reset_for_testing() {
     g_configuration.reset();
     g_current_user = nlohmann::json::object();
     g_current_breadcrumbs = nlohmann::json::array();
+    g_environment_warning_given = false;
     // Deliberately not touching std::set_terminate here: resetting the real process-wide
     // terminate handler between test runs would risk leaving the *test binary itself* without
     // whatever handler it started with if an unrelated later test genuinely terminates.

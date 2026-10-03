@@ -19,7 +19,11 @@
 
 namespace forge_ops_tracker {
 
-/** Configure the client. Call once at startup. `configure` receives a mutable reference to apply overrides to. */
+/**
+ * Configure the client. Call once at startup. `configure` receives a mutable reference to apply overrides to.
+ * Also registers the atexit hook that delivers what is queued at a normal exit, and logs one warning (once per
+ * process) when a DSN is set but the environment is not one of enabled_environments.
+ */
 Configuration& init(const std::function<void(Configuration&)>& configure = nullptr);
 
 /**

@@ -28,6 +28,10 @@ PerformanceFlusher::PerformanceFlusher(const Configuration& configuration, Clien
     : configuration_(configuration), client_(std::move(client)) {}
 
 PerformanceFlusher::~PerformanceFlusher() {
+    shutdown();
+}
+
+void PerformanceFlusher::shutdown() {
     stop();
     bool discarded;
     {

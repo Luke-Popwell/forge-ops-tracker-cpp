@@ -38,6 +38,9 @@ public:
     /** Stops the thread and drops whatever is still queued without delivering it. */
     void discard();
 
+    /** Delivers what is queued, then stops and joins the thread: the destructor's work, callable from the exit hook. Safe to call more than once. */
+    void shutdown();
+
 private:
     const Configuration& configuration_;
     Client client_;

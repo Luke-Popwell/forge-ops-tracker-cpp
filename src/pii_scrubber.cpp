@@ -13,8 +13,10 @@ const std::string kRedacted = "[FILTERED]";
 
 namespace {
 
+// Both lists are leaked rather than plain statics, like configuration.cpp's dsn_pattern(): a
+// capture on another thread during exit must never find them destroyed.
 const std::vector<std::string>& sensitive_keys() {
-    static const std::vector<std::string> keys = {
+    static const std::vector<std::string>* const keys = new std::vector<std::string>{
         "password", "passwd", "pwd",
         "secret", "apisecret", "clientsecret", "secretkey",
         "token", "accesstoken", "refreshtoken", "apikey", "apitoken", "authorization", "authtoken", "bearer", "sessiontoken", "csrftoken",
@@ -22,7 +24,7 @@ const std::vector<std::string>& sensitive_keys() {
         "ssn", "socialsecuritynumber", "socialsecurity",
         "privatekey",
     };
-    return keys;
+    return *keys;
 }
 
 struct Pattern {
@@ -35,7 +37,7 @@ struct Pattern {
 // input for each (see test_pii_scrubber.cpp), not assumed to translate cleanly just because the
 // syntax looks the same.
 const std::vector<Pattern>& patterns() {
-    static const std::vector<Pattern> built = [] {
+    static const std::vector<Pattern>* const built = new std::vector<Pattern>([] {
         std::vector<Pattern> p;
         p.push_back({"EMAIL", std::regex(R"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})")});
         p.push_back({"SSN", std::regex(R"(\b\d{3}-\d{2}-\d{4}\b)")});
@@ -46,8 +48,8 @@ const std::vector<Pattern>& patterns() {
         p.push_back({"STRIPE KEY", std::regex(R"(\b[sr]k_(?:live|test)_[A-Za-z0-9]{10,}\b)")});
         p.push_back({"GITHUB TOKEN", std::regex(R"(\bgh[pousr]_[A-Za-z0-9]{20,}\b)")});
         return p;
-    }();
-    return built;
+    }());
+    return *built;
 }
 
 bool is_sensitive_key(const std::optional<std::string>& key) {

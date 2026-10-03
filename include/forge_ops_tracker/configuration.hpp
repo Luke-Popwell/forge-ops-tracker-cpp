@@ -28,7 +28,8 @@ using TracePropagationTarget = std::variant<std::string, std::regex>;
 class Configuration {
 public:
     std::optional<std::string> dsn;
-    std::string environment = "production";
+    /** FORGE_OPS_ENVIRONMENT when that is set and not blank, else "production". */
+    std::string environment = default_environment();
     std::optional<std::string> release;
     std::optional<std::string> server_name;
 
@@ -157,6 +158,9 @@ public:
     bool is_enabled() const;
 
     void log(const std::string& message) const;
+
+    /** What `environment` starts as: FORGE_OPS_ENVIRONMENT when set and not blank, else "production". */
+    static std::string default_environment();
 };
 
 } // namespace forge_ops_tracker
