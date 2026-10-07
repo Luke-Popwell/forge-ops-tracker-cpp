@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1 (2026-10-07)
+
+- The library now ships its MIT licence (`LICENSE.txt`). Earlier versions were published without one. No code changes.
+
 ## 0.9.0 (2026-10-02)
 
 - Fixed a crash at the end of an ordinary program: capturing a handled exception and then returning 0 from `main` could segfault (exit 139) and lose the event. At static destruction the error queue's global joined its delivery thread, which was still sending and parsing the DSN with a function-local `std::regex` that had already been destroyed. `init()` (and the first capture, for a program that never calls it) now registers an `atexit` hook that delivers what is queued and joins every background thread (errors, traces, changes, performance, metrics) before static destruction starts, and the regexes and lists those threads read are now never destroyed. New `shutdown()` on `DeliveryQueue`, `SpanQueue`, `MetricBuffer` and `PerformanceFlusher` is that hook's per-worker step.
