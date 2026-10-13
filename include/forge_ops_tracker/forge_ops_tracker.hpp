@@ -157,8 +157,9 @@ void flush_performance();
  * captured (a signup is a row, not a running total), so a count or sum computed later is exact. Both
  * are a no-op when reporting isn't enabled for this environment, and a NaN or infinite value is
  * dropped. A buffer holds at most MetricBuffer::max_entries entries and drops further ones until a
- * flush succeeds. A failed delivery keeps every entry, and one captured while a delivery is in flight
- * is kept too.
+ * flush succeeds. A delivery that failed for now keeps every entry (for up to five flushes in a row,
+ * then the batch is dropped), a batch the server rejects is dropped at once, and an entry captured
+ * while a delivery is in flight is kept.
  */
 void capture_metric(const std::string& name, double value = 1.0);
 void capture_infrastructure_metric(const std::string& name, double value, const std::string& hostname = "");

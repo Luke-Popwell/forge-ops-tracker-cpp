@@ -29,6 +29,9 @@ namespace forge_ops_tracker {
  */
 class PerformanceFlusher {
 public:
+    /** A batch that has failed this many flushes in a row is dropped rather than carried further. */
+    static constexpr int max_consecutive_failures = 5;
+
     PerformanceFlusher(const Configuration& configuration, Client client);
     ~PerformanceFlusher();
 
@@ -39,11 +42,14 @@ public:
     void record(const std::string& transaction_name, double duration_ms);
 
     /**
-     * Snapshots the buffered buckets and delivers them as one batch. A failed delivery keeps every
-     * bucket where it is, so the next flush's batch just grows instead of losing what was already
-     * tallied: there's no other copy of this data anywhere.
+     * Snapshots the buffered buckets and delivers them as one batch. A delivery that failed for now
+     * (a network error, a timeout, a 5xx, 408 or 429) keeps every bucket where it is, so the next
+     * flush's batch just grows instead of losing what was already tallied: there's no other copy of
+     * this data anywhere. That is bounded: the batch is dropped when the server rejects it (any
+     * other 4xx, which no retry can fix) or once max_consecutive_failures flushes in a row have
+     * failed, and Configuration::logger is told so.
      *
-     * Only exactly what this snapshot delivered is removed afterward, subtracted from whatever is
+     * Only exactly what this snapshot delivered (or dropped) is removed afterward, subtracted from whatever is
      * in each bucket by then, never the whole map cleared outright. record() can run on another
      * thread while delivery is in flight (the lock is deliberately released around the network
      * call), so a record for a transaction already in the snapshot, or a brand-new one, can land in
@@ -92,6 +98,7 @@ private:
     std::condition_variable condition_;
     std::map<std::string, Bucket> buckets_;
     std::chrono::system_clock::time_point period_started_at_ = std::chrono::system_clock::now();
+    int consecutive_failures_ = 0;
     std::thread worker_;
     bool worker_started_ = false;
     bool stopping_ = false;
@@ -101,6 +108,7 @@ private:
     void ensure_worker_started();
     void run();
     void stop();
+    void remove_sent(const std::map<std::string, Bucket>& snapshot, std::chrono::system_clock::time_point period_end);
 };
 
 } // namespace forge_ops_tracker

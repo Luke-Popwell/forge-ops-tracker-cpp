@@ -2437,6 +2437,250 @@ TEST(metrics_uris_swap_the_trailing_events_segment) {
 
 /* ---- SQL capture ---------------------------------------------------------------------------- */
 
+/* ---- A failed delivery: rejected for good, or failed for now ------------------------------------ */
+
+TEST(delivery_a_4xx_is_rejected_except_408_and_429_which_like_a_5xx_fail_for_now) {
+    using forge_ops_tracker::DeliveryOutcome;
+    using forge_ops_tracker::delivery_outcome_for_status;
+    for (long status : {400L, 401L, 403L, 404L, 413L, 422L}) {
+        ASSERT_TRUE(delivery_outcome_for_status(status) == DeliveryOutcome::rejected);
+    }
+    for (long status : {0L, 408L, 429L, 500L, 502L, 503L, 301L}) {
+        ASSERT_TRUE(delivery_outcome_for_status(status) == DeliveryOutcome::failed);
+    }
+    for (long status : {200L, 201L, 202L, 204L}) {
+        ASSERT_TRUE(delivery_outcome_for_status(status) == DeliveryOutcome::delivered);
+    }
+}
+
+TEST(delivery_client_status_is_the_http_status_and_zero_when_unreachable) {
+    TestServer rejecting(422);
+    Configuration config = performance_configuration(rejecting.port());
+    ASSERT_TRUE(Client(config).performance_samples_status(nlohmann::json::array()) == 422);
+    ASSERT_TRUE(!Client(config).deliver_performance_samples(nlohmann::json::array()));
+
+    config.dsn = dsn_for_port(refused_port());
+    ASSERT_TRUE(Client(config).performance_samples_status(nlohmann::json::array()) == 0);
+}
+
+/* How many lines the logger was given that contain `needle`. */
+static int logged_count(const std::vector<std::string>& lines, const std::string& needle) {
+    int count = 0;
+    for (const auto& line : lines) {
+        if (line.find(needle) != std::string::npos) {
+            count++;
+        }
+    }
+    return count;
+}
+
+TEST(delivery_a_rejected_performance_batch_is_dropped_and_never_sent_again) {
+    TestServer rejecting(401);
+    TestServer working(202);
+    std::vector<std::string> logged;
+    Configuration config = performance_configuration(rejecting.port());
+    config.logger = [&logged](const std::string& line) { logged.push_back(line); };
+    forge_ops_tracker::PerformanceFlusher flusher(config, Client(config));
+    flusher.record("GET /x", 10.0);
+
+    flusher.flush(); /* 401: the server will never take this batch */
+    ASSERT_TRUE(flusher.tally_for_testing("GET /x").count == 0);
+    ASSERT_TRUE(logged_count(logged, "dropped 1 performance samples: rejected by the server (HTTP 401)") == 1);
+
+    flusher.flush(); /* nothing left: no second request */
+    ASSERT_TRUE(rejecting.request_count() == 1);
+
+    config.dsn = dsn_for_port(working.port());
+    flusher.record("GET /y", 20.0);
+    flusher.flush();
+
+    ASSERT_TRUE(working.wait_for_request_count(1));
+    const auto samples = nlohmann::json::parse(request_body(working))["samples"];
+    ASSERT_TRUE(samples.size() == 1);
+    ASSERT_TRUE(samples[0]["transaction_name"] == "GET /y");
+    flusher.discard();
+}
+
+TEST(delivery_a_429_or_an_unreachable_server_keeps_every_performance_bucket) {
+    TestServer limiting(429);
+    Configuration config = performance_configuration(limiting.port());
+    forge_ops_tracker::PerformanceFlusher flusher(config, Client(config));
+    flusher.record("GET /x", 10.0);
+
+    flusher.flush();
+    ASSERT_TRUE(flusher.tally_for_testing("GET /x").count == 1);
+
+    config.dsn = dsn_for_port(refused_port());
+    flusher.flush();
+    ASSERT_TRUE(flusher.tally_for_testing("GET /x").count == 1);
+    flusher.discard();
+}
+
+TEST(delivery_the_fifth_failed_flush_in_a_row_drops_a_performance_batch) {
+    TestServer failing(503);
+    std::vector<std::string> logged;
+    Configuration config = performance_configuration(failing.port());
+    config.logger = [&logged](const std::string& line) { logged.push_back(line); };
+    forge_ops_tracker::PerformanceFlusher flusher(config, Client(config));
+    flusher.record("GET /x", 10.0);
+
+    for (int i = 0; i < 4; i++) {
+        flusher.flush();
+    }
+    ASSERT_TRUE(flusher.tally_for_testing("GET /x").count == 1);
+
+    flusher.flush();
+    ASSERT_TRUE(flusher.tally_for_testing("GET /x").count == 0);
+    ASSERT_TRUE(failing.request_count() == 5);
+    ASSERT_TRUE(logged_count(logged, "after 5 failed flushes in a row") == 1);
+
+    flusher.flush(); /* nothing left: no sixth request */
+    ASSERT_TRUE(failing.request_count() == 5);
+
+    /* The count starts again with the next batch. */
+    flusher.record("GET /y", 10.0);
+    flusher.flush();
+    ASSERT_TRUE(flusher.tally_for_testing("GET /y").count == 1);
+    flusher.discard();
+}
+
+TEST(delivery_a_successful_flush_starts_the_performance_failure_count_again) {
+    TestServer failing(503);
+    TestServer working(202);
+    Configuration config = performance_configuration(failing.port());
+    forge_ops_tracker::PerformanceFlusher flusher(config, Client(config));
+    flusher.record("GET /x", 10.0);
+    for (int i = 0; i < 4; i++) {
+        flusher.flush();
+    }
+
+    config.dsn = dsn_for_port(working.port());
+    flusher.flush();
+    ASSERT_TRUE(flusher.tally_for_testing("GET /x").count == 0);
+
+    config.dsn = dsn_for_port(failing.port());
+    flusher.record("GET /y", 10.0);
+    for (int i = 0; i < 4; i++) {
+        flusher.flush();
+    }
+    ASSERT_TRUE(flusher.tally_for_testing("GET /y").count == 1);
+    flusher.discard();
+}
+
+TEST(delivery_a_rejected_metric_batch_is_dropped_and_never_sent_again) {
+    TestServer rejecting(403);
+    TestServer working(202);
+    std::vector<std::string> logged;
+    Configuration config = metrics_configuration(rejecting.port());
+    config.logger = [&logged](const std::string& line) { logged.push_back(line); };
+    Client client(config);
+    forge_ops_tracker::MetricBuffer buffer(
+        config, [&config] { return config.metric_flush_interval; },
+        [client](const nlohmann::json& entries) { return client.metrics_status(entries); });
+    buffer.record({{"metric_name", "a"}, {"value", 1}});
+
+    buffer.flush(); /* 403: the server will never take this batch */
+    ASSERT_TRUE(buffer.size_for_testing() == 0);
+    ASSERT_TRUE(logged_count(logged, "dropped 1 metrics: rejected by the server (HTTP 403)") == 1);
+
+    buffer.flush(); /* nothing left: no second request */
+    ASSERT_TRUE(rejecting.request_count() == 1);
+
+    config.dsn = dsn_for_port(working.port());
+    buffer.record({{"metric_name", "b"}, {"value", 2}});
+    buffer.flush();
+
+    ASSERT_TRUE(working.wait_for_request_count(1));
+    const auto metrics = nlohmann::json::parse(request_body(working))["metrics"];
+    ASSERT_TRUE(metrics.size() == 1);
+    ASSERT_TRUE(metrics[0]["metric_name"] == "b");
+    buffer.discard();
+}
+
+TEST(delivery_a_5xx_a_408_a_429_or_no_response_keeps_every_metric) {
+    Configuration config = metrics_configuration(1);
+    for (long status : {500L, 503L, 408L, 429L, 0L}) {
+        forge_ops_tracker::MetricBuffer buffer(
+            config, [] { return std::chrono::milliseconds(std::chrono::hours(1)); },
+            [status](const nlohmann::json&) { return status; });
+        buffer.record({{"metric_name", "a"}, {"value", 1}});
+        buffer.flush();
+        ASSERT_TRUE(buffer.size_for_testing() == 1);
+        buffer.discard();
+    }
+}
+
+TEST(delivery_the_fifth_failed_flush_in_a_row_drops_a_metric_batch) {
+    Configuration config = metrics_configuration(1);
+    int calls = 0;
+    forge_ops_tracker::MetricBuffer buffer(
+        config, [] { return std::chrono::milliseconds(std::chrono::hours(1)); },
+        [&calls](const nlohmann::json&) {
+            calls++;
+            return 503L;
+        });
+    buffer.record({{"metric_name", "a"}, {"value", 1}});
+
+    for (int i = 0; i < 4; i++) {
+        buffer.flush();
+    }
+    ASSERT_TRUE(buffer.size_for_testing() == 1);
+
+    buffer.flush();
+    ASSERT_TRUE(buffer.size_for_testing() == 0);
+    ASSERT_TRUE(calls == 5);
+
+    /* The count starts again with the next batch. */
+    buffer.record({{"metric_name", "b"}, {"value", 2}});
+    buffer.flush();
+    ASSERT_TRUE(buffer.size_for_testing() == 1);
+    buffer.discard();
+}
+
+TEST(delivery_a_deliver_that_only_says_false_is_bounded_the_same_way) {
+    Configuration config = metrics_configuration(1);
+    forge_ops_tracker::MetricBuffer buffer(
+        config, [](const nlohmann::json&) { return false; }, [] { return std::chrono::milliseconds(std::chrono::hours(1)); });
+    buffer.record({{"metric_name", "a"}, {"value", 1}});
+
+    for (int i = 0; i < 4; i++) {
+        buffer.flush();
+    }
+    ASSERT_TRUE(buffer.size_for_testing() == 1);
+    buffer.flush();
+    ASSERT_TRUE(buffer.size_for_testing() == 0);
+    buffer.discard();
+}
+
+TEST(delivery_an_entry_recorded_while_a_rejected_delivery_is_in_flight_outlives_the_dropped_batch) {
+    Configuration config = metrics_configuration(1);
+    forge_ops_tracker::MetricBuffer buffer(
+        config, [] { return std::chrono::milliseconds(std::chrono::hours(1)); }, [](const nlohmann::json&) { return 422L; });
+    buffer.record({{"metric_name", "first"}, {"value", 1}});
+    auto* raw = &buffer;
+    buffer.set_before_delivery_hook_for_testing([raw] {
+        raw->set_before_delivery_hook_for_testing(nullptr);
+        raw->record({{"metric_name", "during"}, {"value", 2}});
+    });
+
+    buffer.flush();
+
+    ASSERT_TRUE(buffer.size_for_testing() == 1);
+    buffer.discard();
+}
+
+TEST(delivery_capture_metric_drops_a_batch_the_server_rejects_through_the_full_stack) {
+    TestServer rejecting(401);
+    tracker_init_for(rejecting);
+
+    forge_ops_tracker::capture_metric("signup");
+    forge_ops_tracker::flush_metrics(); /* 401: dropped */
+    forge_ops_tracker::flush_metrics(); /* nothing left to send */
+
+    ASSERT_TRUE(rejecting.request_count() == 1);
+    forge_ops_tracker::reset_for_testing();
+}
+
 TEST(sql_mask_replaces_strings_and_numbers_but_not_identifiers_or_placeholders) {
     using forge_ops_tracker::sql_statement::mask;
     ASSERT_TRUE(*mask("SELECT * FROM orders2 WHERE email = 'a@b.co' AND id = 42 AND x = $1") == "SELECT * FROM orders2 WHERE email = ? AND id = ? AND x = $1");
@@ -2876,6 +3120,19 @@ int main(int argc, char** argv) {
     RUN(metrics_capture_metric_and_capture_infrastructure_metric_deliver_to_their_own_endpoints_through_the_full_stack);
     RUN(metrics_captures_are_a_no_op_when_reporting_is_not_enabled_for_this_environment);
     RUN(metrics_uris_swap_the_trailing_events_segment);
+
+    RUN(delivery_a_4xx_is_rejected_except_408_and_429_which_like_a_5xx_fail_for_now);
+    RUN(delivery_client_status_is_the_http_status_and_zero_when_unreachable);
+    RUN(delivery_a_rejected_performance_batch_is_dropped_and_never_sent_again);
+    RUN(delivery_a_429_or_an_unreachable_server_keeps_every_performance_bucket);
+    RUN(delivery_the_fifth_failed_flush_in_a_row_drops_a_performance_batch);
+    RUN(delivery_a_successful_flush_starts_the_performance_failure_count_again);
+    RUN(delivery_a_rejected_metric_batch_is_dropped_and_never_sent_again);
+    RUN(delivery_a_5xx_a_408_a_429_or_no_response_keeps_every_metric);
+    RUN(delivery_the_fifth_failed_flush_in_a_row_drops_a_metric_batch);
+    RUN(delivery_a_deliver_that_only_says_false_is_bounded_the_same_way);
+    RUN(delivery_an_entry_recorded_while_a_rejected_delivery_is_in_flight_outlives_the_dropped_batch);
+    RUN(delivery_capture_metric_drops_a_batch_the_server_rejects_through_the_full_stack);
 
     RUN(changes_build_change_sends_the_documented_shape_with_every_optional_field);
     RUN(changes_build_change_defaults_environment_and_occurred_at_and_leaves_unset_keys_out);

@@ -11,6 +11,20 @@
 namespace forge_ops_tracker {
 
 /**
+ * What became of one delivery attempt. `rejected` is a 4xx other than 408 and 429: the server will
+ * never take this payload, so whoever holds it lets it go instead of sending it again. `failed` is
+ * everything that may work later (no DSN, a network error, a timeout, a 5xx, 408, 429), so the
+ * payload is kept and retried, within the bounds each caller sets.
+ */
+enum class DeliveryOutcome { delivered, rejected, failed };
+
+/** The outcome an HTTP status stands for; 0 is no response at all. */
+DeliveryOutcome delivery_outcome_for_status(long status);
+
+/** @internal Why a payload with this status was let go, for the one log line that says so. */
+std::string delivery_drop_reason(long status);
+
+/**
  * Delivers one payload over HTTP. Every failure mode: DNS, connection, timeout, a non-2xx
  * response: is caught here and turned into a `false` return rather than a thrown exception,
  * since a broken or unreachable tracker must never be able to break the host app. Uses libcurl:
@@ -62,10 +76,21 @@ public:
      */
     bool deliver_change(const nlohmann::json& change) const;
 
+    /**
+     * The same requests as deliver_performance_samples(), deliver_metrics() and
+     * deliver_infrastructure_metrics(), returning the HTTP status instead (0 when there was no
+     * response), for the callers inside this library that hold on to a batch and so need to know
+     * whether a failure is final (see DeliveryOutcome), not only that it happened. Never throw.
+     */
+    long performance_samples_status(const nlohmann::json& samples) const;
+    long metrics_status(const nlohmann::json& entries) const;
+    long infrastructure_metrics_status(const nlohmann::json& entries) const;
+
 private:
     const Configuration& configuration_;
 
-    bool post(const std::optional<std::string>& uri, const nlohmann::json& payload,
+    // The HTTP status of the response, or 0 when there was none.
+    long post(const std::optional<std::string>& uri, const nlohmann::json& payload,
               std::optional<std::chrono::milliseconds> max_time = std::nullopt) const;
 };
 

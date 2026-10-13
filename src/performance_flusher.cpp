@@ -102,11 +102,39 @@ void PerformanceFlusher::flush() {
         });
     }
 
-    if (!client_.deliver_performance_samples(samples)) {
-        return;
-    }
+    const long status = client_.performance_samples_status(samples);
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Decided under the lock, logged after it: a logger that throws must never leave it held.
+    std::string dropped;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        switch (delivery_outcome_for_status(status)) {
+            case DeliveryOutcome::delivered:
+                consecutive_failures_ = 0;
+                break;
+            case DeliveryOutcome::rejected:
+                consecutive_failures_ = 0;
+                dropped = "[forge-ops-tracker] dropped " + std::to_string(samples.size()) + " performance samples: " + delivery_drop_reason(status);
+                break;
+            case DeliveryOutcome::failed:
+                consecutive_failures_ += 1;
+                if (consecutive_failures_ < max_consecutive_failures) {
+                    return;
+                }
+                consecutive_failures_ = 0;
+                dropped = "[forge-ops-tracker] dropped " + std::to_string(samples.size()) + " performance samples after " +
+                          std::to_string(max_consecutive_failures) + " failed flushes in a row: " + delivery_drop_reason(status);
+                break;
+        }
+        remove_sent(snapshot, period_end);
+    }
+    if (!dropped.empty()) {
+        configuration_.log(dropped);
+    }
+}
+
+// Called with the lock held.
+void PerformanceFlusher::remove_sent(const std::map<std::string, Bucket>& snapshot, std::chrono::system_clock::time_point period_end) {
     for (const auto& [name, sent] : snapshot) {
         auto it = buckets_.find(name);
         if (it == buckets_.end()) {
@@ -143,6 +171,7 @@ void PerformanceFlusher::discard() {
     std::lock_guard<std::mutex> lock(mutex_);
     discarded_ = true;
     buckets_.clear();
+    consecutive_failures_ = 0;
 }
 
 PerformanceFlusher::Tally PerformanceFlusher::tally_for_testing(const std::string& transaction_name) {

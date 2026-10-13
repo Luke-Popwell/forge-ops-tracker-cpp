@@ -25,16 +25,20 @@ namespace forge_ops_tracker {
  * class twice; here it is one class instantiated twice, told which delivery function and flush
  * interval to use.
  *
- * Three deliberate differences from the Ruby buffers:
+ * Four deliberate differences from the Ruby buffers:
  *
  *  - A flush snapshots the first N entries and, on success, removes exactly those N, instead of
  *    resetting the whole list, so an entry recorded while the request is in flight (the lock is
  *    released around the network call) is kept for the next flush rather than lost.
  *  - The buffer is capped at max_entries, and once full further entries are dropped until a flush
- *    succeeds: a plan without the feature answers 403 on every flush, and an uncapped buffer would
- *    then grow for as long as the process lives. Dropping the newest rather than the oldest keeps
- *    the entries a flush is delivering at the front of the list, which is what makes removing
+ *    succeeds or lets its batch go: an unreachable server fails every flush, and an uncapped buffer
+ *    would then grow for as long as the process lives. Dropping the newest rather than the oldest
+ *    keeps the entries a flush is delivering at the front of the list, which is what makes removing
  *    exactly them afterward exact.
+ *  - A batch is not retried without end. One the server rejects (a 4xx other than 408 and 429, such
+ *    as the 403 a plan without the feature answers) is dropped at once, and one that has failed
+ *    max_consecutive_failures flushes in a row is dropped too, each with a line to
+ *    Configuration::logger.
  *  - A NaN or infinite value is dropped at record time: nlohmann::json would serialize it as null,
  *    which the server would reject, taking the whole batch with it.
  *
@@ -48,8 +52,22 @@ class MetricBuffer {
 public:
     static constexpr std::size_t max_entries = 1000;
 
-    /** `deliver` takes a batch and returns whether delivery succeeded; `interval` is read fresh each cycle. */
+    /** A batch that has failed this many flushes in a row is dropped rather than carried further. */
+    static constexpr int max_consecutive_failures = 5;
+
+    /**
+     * `deliver` takes a batch and returns whether delivery succeeded; `interval` is read fresh each
+     * cycle. A `false` is a failure that may work later: the batch is kept, up to
+     * max_consecutive_failures flushes in a row.
+     */
     MetricBuffer(const Configuration& configuration, std::function<bool(const nlohmann::json&)> deliver, std::function<std::chrono::milliseconds()> interval);
+
+    /**
+     * The same, for a `deliver_status` that returns the HTTP status (0 for no response), so a
+     * rejected batch can be told from a failed one. The interval comes first here so the two
+     * constructors can never be mistaken for each other.
+     */
+    MetricBuffer(const Configuration& configuration, std::function<std::chrono::milliseconds()> interval, std::function<long(const nlohmann::json&)> deliver_status);
     ~MetricBuffer();
 
     MetricBuffer(const MetricBuffer&) = delete;
@@ -58,7 +76,11 @@ public:
     /** Adds one entry (everything but recorded_at, which is stamped here); returns whether it was kept. */
     bool record(nlohmann::json entry);
 
-    /** Delivers everything buffered so far as one batch. A failed delivery keeps every entry. */
+    /**
+     * Delivers everything buffered so far as one batch. A delivery that failed for now keeps every
+     * entry; a rejected batch, or one that has failed max_consecutive_failures flushes in a row, is
+     * dropped.
+     */
     void flush();
 
     /** Stops the thread and drops everything buffered without delivering it. */
@@ -79,12 +101,13 @@ public:
 
 private:
     const Configuration& configuration_;
-    std::function<bool(const nlohmann::json&)> deliver_;
+    std::function<long(const nlohmann::json&)> deliver_status_;
     std::function<std::chrono::milliseconds()> interval_;
 
     std::mutex mutex_;
     std::condition_variable condition_;
     std::vector<nlohmann::json> entries_;
+    int consecutive_failures_ = 0;
     std::thread worker_;
     bool worker_started_ = false;
     bool stopping_ = false;

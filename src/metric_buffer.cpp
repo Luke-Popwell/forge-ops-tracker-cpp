@@ -22,8 +22,13 @@ std::string now_timestamp() {
 
 } // namespace
 
+// A plain true/false can't say why, so a false is "no response": kept, and counted toward the cap.
 MetricBuffer::MetricBuffer(const Configuration& configuration, std::function<bool(const nlohmann::json&)> deliver, std::function<std::chrono::milliseconds()> interval)
-    : configuration_(configuration), deliver_(std::move(deliver)), interval_(std::move(interval)) {}
+    : MetricBuffer(configuration, std::move(interval),
+                   [deliver = std::move(deliver)](const nlohmann::json& entries) -> long { return deliver(entries) ? 200 : 0; }) {}
+
+MetricBuffer::MetricBuffer(const Configuration& configuration, std::function<std::chrono::milliseconds()> interval, std::function<long(const nlohmann::json&)> deliver_status)
+    : configuration_(configuration), deliver_status_(std::move(deliver_status)), interval_(std::move(interval)) {}
 
 MetricBuffer::~MetricBuffer() {
     shutdown();
@@ -83,14 +88,37 @@ void MetricBuffer::flush() {
         hook();
     }
 
-    if (!deliver_(batch)) {
-        return;
-    }
+    const long status = deliver_status_(batch);
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    // Exactly the entries just delivered: anything recorded while the request was in flight sits
-    // after them and stays for the next flush.
-    entries_.erase(entries_.begin(), entries_.begin() + static_cast<std::ptrdiff_t>(count));
+    // Decided under the lock, logged after it: a logger that throws must never leave it held.
+    std::string dropped;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        switch (delivery_outcome_for_status(status)) {
+            case DeliveryOutcome::delivered:
+                consecutive_failures_ = 0;
+                break;
+            case DeliveryOutcome::rejected:
+                consecutive_failures_ = 0;
+                dropped = "[forge-ops-tracker] dropped " + std::to_string(count) + " metrics: " + delivery_drop_reason(status);
+                break;
+            case DeliveryOutcome::failed:
+                consecutive_failures_ += 1;
+                if (consecutive_failures_ < max_consecutive_failures) {
+                    return;
+                }
+                consecutive_failures_ = 0;
+                dropped = "[forge-ops-tracker] dropped " + std::to_string(count) + " metrics after " + std::to_string(max_consecutive_failures) +
+                          " failed flushes in a row: " + delivery_drop_reason(status);
+                break;
+        }
+        // Exactly the entries just delivered or dropped: anything recorded while the request was in
+        // flight sits after them and stays for the next flush.
+        entries_.erase(entries_.begin(), entries_.begin() + static_cast<std::ptrdiff_t>(count));
+    }
+    if (!dropped.empty()) {
+        configuration_.log(dropped);
+    }
 }
 
 void MetricBuffer::discard() {
@@ -98,6 +126,7 @@ void MetricBuffer::discard() {
     std::lock_guard<std::mutex> lock(mutex_);
     discarded_ = true;
     entries_.clear();
+    consecutive_failures_ = 0;
 }
 
 std::size_t MetricBuffer::size_for_testing() {

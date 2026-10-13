@@ -20,7 +20,7 @@ include(FetchContent)
 FetchContent_Declare(
   forge_ops_tracker
   GIT_REPOSITORY https://github.com/Luke-Popwell/forge-ops-tracker-cpp.git
-  GIT_TAG v0.9.1
+  GIT_TAG v0.10.0
 )
 FetchContent_MakeAvailable(forge_ops_tracker)
 target_link_libraries(your_app PRIVATE forge_ops_tracker)
@@ -244,7 +244,10 @@ stops promptly. What's left is flushed when the process exits normally (the flus
 the C++ equivalent of the Ruby gem's `at_exit`); a process that exits some other way (a fatal
 signal, `_exit`) loses the last window. `forge_ops_tracker::flush_performance()` sends it right now.
 
-A failed delivery keeps every tally, so the next flush's window just grows. What a flush delivered
+A delivery that failed for now (a network error, a timeout, a 5xx, 408 or 429) keeps every tally, so
+the next flush's window just grows, for up to five flushes in a row; after the fifth the batch is
+dropped. A batch the server rejects (any other 4xx) is dropped at once, since sending it again could
+never work. Either way `config.logger`, if set, is told what was dropped and why. What a flush delivered
 is *subtracted* from the tallies afterward, never the whole map cleared: a `record_performance` call
 from another thread that lands while the network call is in flight (the lock is deliberately
 released around it) would otherwise be silently discarded, a real bug `sdks/go` had and fixed and
@@ -414,11 +417,13 @@ destructor runs at exit), so a short-lived cron program that captures a few read
 Every entry is stored as it was captured (a signup is a row, not a running total), so a count or sum
 you compute later is exact. Both are a no-op when reporting isn't enabled for the environment.
 
-A failed delivery keeps every entry for the next flush, and an entry captured while a delivery is in
-flight is kept too (the Ruby gem's own buffer loses it; a test pins this with a hook that captures at
-exactly that moment). Each buffer holds at most 1000 entries and drops further ones until a flush
-succeeds, since a plan without the feature rejects every flush and would otherwise grow it for as long
-as the process lives. A NaN or infinite value is dropped at capture: `nlohmann::json` serializes it as
+A delivery that failed for now (a network error, a timeout, a 5xx, 408 or 429) keeps every entry for
+the next flush, and an entry captured while a delivery is in flight is kept too (the Ruby gem's own
+buffer loses it; a test pins this with a hook that captures at exactly that moment). A batch the
+server rejects (any other 4xx, such as the 403 of a plan without the feature) is dropped at once, and
+so is one that has failed five flushes in a row; `config.logger`, if set, is told each time. Each
+buffer holds at most 1000 entries and drops further ones until a flush succeeds or lets its batch go,
+since an unreachable server would otherwise grow it for as long as the process lives. A NaN or infinite value is dropped at capture: `nlohmann::json` serializes it as
 `null`, which the server would reject along with the whole batch behind it. Requires a ForgeOps plan
 that includes custom metrics / infrastructure monitoring.
 

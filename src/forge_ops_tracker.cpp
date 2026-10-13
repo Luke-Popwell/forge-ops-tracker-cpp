@@ -137,11 +137,11 @@ void ensure_metric_buffers() {
         Configuration& config = configuration();
         auto client = std::make_shared<Client>(config);
         g_metric_buffer = std::make_unique<MetricBuffer>(
-            config, [client](const nlohmann::json& entries) { return client->deliver_metrics(entries); },
-            [&config] { return config.metric_flush_interval; });
+            config, [&config] { return config.metric_flush_interval; },
+            [client](const nlohmann::json& entries) { return client->metrics_status(entries); });
         g_infrastructure_metric_buffer = std::make_unique<MetricBuffer>(
-            config, [client](const nlohmann::json& entries) { return client->deliver_infrastructure_metrics(entries); },
-            [&config] { return config.infrastructure_metric_flush_interval; });
+            config, [&config] { return config.infrastructure_metric_flush_interval; },
+            [client](const nlohmann::json& entries) { return client->infrastructure_metrics_status(entries); });
     }
 }
 

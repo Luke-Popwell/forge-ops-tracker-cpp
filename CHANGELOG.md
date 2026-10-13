@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.0 (2026-10-13)
+
+- A batch the server will never accept is no longer sent again and again. A response of 4xx (other than 408 and 429) now means a batch of performance samples, metrics or infrastructure readings is dropped. A network error, a timeout, a 5xx, 408 or 429 still keeps the batch for the next flush, but not for good: it is dropped after five failed flushes in a row. Each drop is passed once to `Configuration::logger`, if you set one, saying what was dropped and why. Before, any failure kept the batch, so a rejected one was sent at every flush for as long as the process lived. Errors, traces and changes are unchanged: each was already sent once and never retried.
+- New `Client::performance_samples_status`, `metrics_status` and `infrastructure_metrics_status` return the HTTP status (0 for no response), `delivery_outcome_for_status` sorts one into `DeliveryOutcome::delivered`, `rejected` or `failed`, and a second `MetricBuffer` constructor takes a function that returns the status. Every existing function is unchanged: `Client::deliver` and the rest still return `true` only for a 2xx, and a `MetricBuffer` built with a `bool` function treats `false` as a failure that may pass.
+
 ## 0.9.1 (2026-10-07)
 
 - The library now ships its MIT licence (`LICENSE.txt`). Earlier versions were published without one. No code changes.
