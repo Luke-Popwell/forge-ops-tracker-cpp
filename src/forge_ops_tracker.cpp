@@ -227,7 +227,8 @@ void set_user(const nlohmann::json& user) {
 
 void add_breadcrumb(const std::string& message, const std::string& category, const std::string& level, const nlohmann::json& data) {
     const Configuration& config = configuration();
-    if (!config.track_breadcrumbs) {
+    // Under strict privacy a breadcrumb is never sent, so it isn't kept either.
+    if (!config.track_breadcrumbs || config.strict_privacy) {
         return;
     }
 

@@ -55,6 +55,12 @@ std::string percent_decode(const std::string& in) {
     return out;
 }
 
+std::string trimmed(const std::string& value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return first == std::string::npos ? std::string() : value.substr(first, last - first + 1);
+}
+
 struct ParsedDsn {
     std::string scheme;
     std::optional<std::string> api_key;
@@ -158,6 +164,40 @@ bool Configuration::is_enabled() const {
 std::string Configuration::default_environment() {
     const char* value = std::getenv("FORGE_OPS_ENVIRONMENT");
     return value != nullptr && value[0] != '\0' ? std::string(value) : std::string("production");
+}
+
+bool Configuration::default_strict_privacy() {
+    const char* value = std::getenv("FORGE_OPS_STRICT_PRIVACY");
+    if (value == nullptr) {
+        return false;
+    }
+    std::string normalized = trimmed(value);
+    for (char& c : normalized) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return normalized == "true";
+}
+
+std::vector<std::string> Configuration::default_privacy_allowed_fields() {
+    std::vector<std::string> fields;
+    const char* value = std::getenv("FORGE_OPS_PRIVACY_ALLOWED_FIELDS");
+    if (value == nullptr) {
+        return fields;
+    }
+    std::string list(value);
+    std::size_t start = 0;
+    while (start <= list.size()) {
+        std::size_t comma = list.find(',', start);
+        std::string name = trimmed(list.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+        if (!name.empty()) {
+            fields.push_back(name);
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    return fields;
 }
 
 void Configuration::log(const std::string& message) const {

@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -47,6 +48,7 @@
 #include "forge_ops_tracker/pii_scrubber.hpp"
 #include "forge_ops_tracker/reporter.hpp"
 #include "forge_ops_tracker/span_buffer.hpp"
+#include "forge_ops_tracker/strict_privacy.hpp"
 #include "forge_ops_tracker/trace_parent.hpp"
 
 using forge_ops_tracker::Client;
@@ -2967,6 +2969,263 @@ TEST(changes_uri_swaps_the_trailing_events_segment) {
     ASSERT_TRUE(config.changes_uri() == std::optional<std::string>("https://tracker.example.com/api/v1/changes"));
 }
 
+/* ---- strict privacy ----------------------------------------------------------------------------
+ * The expected results come from tests/fixtures/strict_privacy_vectors.json, a byte identical copy
+ * of sdks/strict_privacy_vectors.json, which the server's own implementation generated. */
+
+static nlohmann::json strict_privacy_vectors() {
+    std::ifstream file(std::string(FORGE_OPS_TEST_FIXTURES_DIR) + "/strict_privacy_vectors.json");
+    return nlohmann::json::parse(file);
+}
+
+TEST(strict_privacy_every_fingerprint_vector_normalizes_and_hashes_exactly) {
+    nlohmann::json vectors = strict_privacy_vectors()["fingerprint"];
+    ASSERT_TRUE(!vectors.empty());
+    for (const auto& vector : vectors) {
+        std::string message = vector["message"].get<std::string>();
+        if (forge_ops_tracker::strict_privacy::normalize_message(message) != vector["normalized"].get<std::string>() ||
+            forge_ops_tracker::strict_privacy::message_fingerprint(message) != vector["fingerprint"].get<std::string>()) {
+            std::printf("  mismatch for %s\n", vector.dump().c_str());
+            g_current_test_failed = true;
+        }
+    }
+}
+
+TEST(strict_privacy_every_path_vector_strips_ids) {
+    nlohmann::json vectors = strict_privacy_vectors()["path"];
+    ASSERT_TRUE(!vectors.empty());
+    for (const auto& vector : vectors) {
+        if (forge_ops_tracker::strict_privacy::path_without_ids(vector["path"].get<std::string>()) != vector["strict"].get<std::string>()) {
+            std::printf("  mismatch for %s\n", vector.dump().c_str());
+            g_current_test_failed = true;
+        }
+    }
+}
+
+TEST(strict_privacy_every_span_name_vector_keeps_only_the_method_and_host) {
+    nlohmann::json vectors = strict_privacy_vectors()["span_name"];
+    ASSERT_TRUE(!vectors.empty());
+    for (const auto& vector : vectors) {
+        if (forge_ops_tracker::strict_privacy::span_name(vector["name"].get<std::string>()) != vector["strict"].get<std::string>()) {
+            std::printf("  mismatch for %s\n", vector.dump().c_str());
+            g_current_test_failed = true;
+        }
+    }
+}
+
+TEST(strict_privacy_sha256_matches_the_published_digests) {
+    using forge_ops_tracker::strict_privacy::sha256_hex;
+    ASSERT_TRUE(sha256_hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    // Two blocks: 56 bytes leaves no room for the length in the first.
+    ASSERT_TRUE(sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+    ASSERT_TRUE(sha256_hex(std::string(1000, 'a')) == "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3");
+}
+
+TEST(strict_privacy_is_off_by_default_and_reads_the_environment_with_code_winning) {
+    const char* saved_strict = std::getenv("FORGE_OPS_STRICT_PRIVACY");
+    const char* saved_fields = std::getenv("FORGE_OPS_PRIVACY_ALLOWED_FIELDS");
+    std::optional<std::string> strict_copy = saved_strict ? std::optional<std::string>(saved_strict) : std::nullopt;
+    std::optional<std::string> fields_copy = saved_fields ? std::optional<std::string>(saved_fields) : std::nullopt;
+    ::unsetenv("FORGE_OPS_STRICT_PRIVACY");
+    ::unsetenv("FORGE_OPS_PRIVACY_ALLOWED_FIELDS");
+
+    Configuration defaults;
+    bool default_off = !defaults.strict_privacy && defaults.privacy_allowed_fields.empty();
+
+    ::setenv("FORGE_OPS_STRICT_PRIVACY", "TRUE", 1);
+    ::setenv("FORGE_OPS_PRIVACY_ALLOWED_FIELDS", " error_code, feature ,,", 1);
+    Configuration from_environment;
+    bool read = from_environment.strict_privacy && from_environment.privacy_allowed_fields == std::vector<std::string>{"error_code", "feature"};
+
+    Configuration in_code;
+    in_code.strict_privacy = false;
+    in_code.privacy_allowed_fields = {"plan"};
+    bool code_wins = !in_code.strict_privacy && in_code.privacy_allowed_fields == std::vector<std::string>{"plan"};
+
+    ::setenv("FORGE_OPS_STRICT_PRIVACY", "1", 1);
+    bool only_true = !Configuration().strict_privacy;
+
+    ::unsetenv("FORGE_OPS_STRICT_PRIVACY");
+    ::unsetenv("FORGE_OPS_PRIVACY_ALLOWED_FIELDS");
+    if (strict_copy) {
+        ::setenv("FORGE_OPS_STRICT_PRIVACY", strict_copy->c_str(), 1);
+    }
+    if (fields_copy) {
+        ::setenv("FORGE_OPS_PRIVACY_ALLOWED_FIELDS", fields_copy->c_str(), 1);
+    }
+    ASSERT_TRUE(default_off);
+    ASSERT_TRUE(read);
+    ASSERT_TRUE(code_wins);
+    ASSERT_TRUE(only_true);
+}
+
+// Built from one call site so two configurations produce the same backtrace.
+static nlohmann::json strict_privacy_sample_event(const Configuration& config) {
+    EventBuilder builder(config);
+    nlohmann::json crumbs = nlohmann::json::array({{{"category", "controller"}, {"message", "GET /patients/42"}, {"level", "info"}, {"timestamp", "2024-01-15T10:29:58Z"}, {"data", nlohmann::json::object()}}});
+    nlohmann::json context = {{"error_code", "E42"}, {"attempt", 3}, {"retry", true}, {"patient", "Jane Doe"}, {"feature", {{"nested", "x"}}}};
+    nlohmann::json user = {{"id", 42}, {"email", "jane@example.com"}, {"username", "jane"}};
+    try {
+        throw fot_test_exc::BoomError("Couldn't find Patient with id=8821 for jane@example.com");
+    } catch (const std::exception& e) {
+        return builder.build(e, context, user, crumbs, "SELECT * FROM patients WHERE name = 'Jane'", std::string(32, 'a'));
+    }
+}
+
+static Configuration strict_privacy_sql_configuration() {
+    Configuration config;
+    config.capture_sql_statement = true;
+    return config;
+}
+
+TEST(strict_privacy_an_event_carries_only_structured_facts_and_a_fingerprint) {
+    Configuration config = strict_privacy_sql_configuration();
+    config.strict_privacy = true;
+    config.privacy_allowed_fields = {"error_code", "attempt", "retry", "feature", "missing"};
+    nlohmann::json payload = strict_privacy_sample_event(config);
+
+    ASSERT_TRUE(payload["message"] == "");
+    // The message as it would otherwise have gone out, after PII scrubbing.
+    ASSERT_TRUE(payload["message_fingerprint"] == forge_ops_tracker::strict_privacy::message_fingerprint("Couldn't find Patient with id=8821 for [EMAIL FILTERED]"));
+    ASSERT_TRUE(std::regex_match(payload["message_fingerprint"].get<std::string>(), std::regex("^[0-9a-f]{32}$")));
+    ASSERT_TRUE(!payload.contains("breadcrumbs"));
+    ASSERT_TRUE(!payload.contains("endpoint"));
+    ASSERT_TRUE(!payload.contains("sql_statement"));
+    ASSERT_TRUE(payload["sql_objects"].is_object() || payload["sql_objects"].is_array());
+    ASSERT_TRUE(payload["context"] == nlohmann::json({{"error_code", "E42"}, {"attempt", 3}, {"retry", true}}));
+    ASSERT_TRUE(!payload.contains("tags")); // nothing allowed was in it
+    ASSERT_TRUE(payload["user"] == nlohmann::json({{"id", "42"}}));
+    for (const auto& frame : payload["backtrace"]) {
+        ASSERT_TRUE(!frame.contains("context_line") && !frame.contains("pre_context") && !frame.contains("post_context"));
+    }
+    ASSERT_TRUE(payload["exception_class"] == "fot_test_exc::BoomError");
+    ASSERT_TRUE(payload["trace_id"] == std::string(32, 'a'));
+    ASSERT_TRUE(!payload["backtrace"].empty());
+    std::string wire = payload.dump();
+    ASSERT_TRUE(wire.find("Jane") == std::string::npos && wire.find("jane") == std::string::npos && wire.find("8821") == std::string::npos);
+}
+
+TEST(strict_privacy_an_event_with_nothing_allowed_has_no_context_and_no_user_without_an_id) {
+    Configuration config;
+    config.strict_privacy = true;
+    EventBuilder builder(config);
+    nlohmann::json payload;
+    try {
+        throw fot_test_exc::BoomError("boom");
+    } catch (const std::exception& e) {
+        payload = builder.build(e, {{"error_code", "E42"}}, {{"email", "jane@example.com"}});
+    }
+    ASSERT_TRUE(!payload.contains("context"));
+    ASSERT_TRUE(!payload.contains("user"));
+    ASSERT_TRUE(payload["message_fingerprint"] == "81f52337ebb4cb1669bb802c708807dd");
+}
+
+TEST(strict_privacy_off_leaves_an_event_exactly_as_before) {
+    Configuration before = strict_privacy_sql_configuration();
+    Configuration off = strict_privacy_sql_configuration();
+    off.strict_privacy = false;
+    off.privacy_allowed_fields = {"error_code"};
+
+    nlohmann::json expected = strict_privacy_sample_event(before);
+    nlohmann::json actual = strict_privacy_sample_event(off);
+    expected.erase("occurred_at");
+    actual.erase("occurred_at");
+    ASSERT_TRUE(actual == expected);
+    ASSERT_TRUE(actual["message"] == "Couldn't find Patient with id=8821 for [EMAIL FILTERED]");
+    ASSERT_TRUE(!actual.contains("message_fingerprint"));
+    ASSERT_TRUE(actual["breadcrumbs"].size() == 1);
+    ASSERT_TRUE(actual.contains("sql_statement"));
+    ASSERT_TRUE(actual["context"]["patient"] == "Jane Doe");
+    ASSERT_TRUE(actual["user"]["email"] == "jane@example.com");
+}
+
+TEST(strict_privacy_spans_name_outbound_calls_by_host_and_keep_only_database_data) {
+    Configuration config = tracing_configuration();
+    config.strict_privacy = true;
+    forge_ops_tracker::SpanBuffer buffer(config);
+    auto at = std::chrono::system_clock::now();
+    buffer.record_leaf("GET https://api.example.com/patients/42?x=1", "http", at, 2.0, {{"http.url", "https://api.example.com/patients/42"}, {"http.status_code", 200}});
+    buffer.record_leaf("SELECT patients", "database", at, 1.0, {{"db.statement", "SELECT * FROM patients WHERE id = 42"}, {"db.system", "PostgreSQL"}, {"patient", "Jane"}});
+    buffer.record_leaf("charge", "service", at, 1.0, {{"patient", "Jane"}});
+
+    auto trace = buffer.finish("GET /patients/42/notes", at, 1500.0);
+    ASSERT_TRUE(trace.has_value());
+    ASSERT_TRUE(!span_named(*trace, "GET /patients/:id/notes").is_null());
+    auto http = span_named(*trace, "GET api.example.com");
+    ASSERT_TRUE(http["data"].is_object() && http["data"].empty());
+    auto database = span_named(*trace, "SELECT patients");
+    ASSERT_TRUE(database["data"] == nlohmann::json({{"db.statement", "SELECT * FROM patients WHERE id = ?"}, {"db.system", "postgresql"}}));
+    ASSERT_TRUE(span_named(*trace, "charge")["data"].empty());
+    ASSERT_TRUE(trace->dump().find("Jane") == std::string::npos && trace->dump().find("patients/42") == std::string::npos);
+
+    config.strict_privacy = false;
+    forge_ops_tracker::SpanBuffer off(config);
+    off.record_leaf("GET https://api.example.com/patients/42?x=1", "http", at, 2.0, {{"patient", "Jane"}});
+    auto unchanged = off.finish("GET /patients/42/notes", at, 1500.0);
+    ASSERT_TRUE(span_named(*unchanged, "GET https://api.example.com/patients/42?x=1")["data"]["patient"] == "Jane");
+    ASSERT_TRUE(!span_named(*unchanged, "GET /patients/42/notes").is_null());
+}
+
+TEST(strict_privacy_records_no_breadcrumbs_and_sends_a_strict_event_through_the_full_stack) {
+    TestServer server(202);
+    tracker_init_for(server, [](Configuration& c) {
+        c.strict_privacy = true;
+        c.privacy_allowed_fields = {"error_code"};
+    });
+
+    forge_ops_tracker::add_breadcrumb("viewed patient Jane Doe");
+    forge_ops_tracker::set_user({{"id", "u-1"}, {"email", "jane@example.com"}});
+    try {
+        throw fot_test_exc::BoomError("no record for Jane Doe");
+    } catch (const std::exception& e) {
+        forge_ops_tracker::capture_exception(e, {{"error_code", "E42"}, {"name", "Jane Doe"}});
+    }
+
+    ASSERT_TRUE(server.wait_for_request_count(1));
+    nlohmann::json body = nlohmann::json::parse(request_body(server));
+    ASSERT_TRUE(!body.contains("breadcrumbs"));
+    ASSERT_TRUE(body["message"] == "");
+    ASSERT_TRUE(body["message_fingerprint"] == forge_ops_tracker::strict_privacy::message_fingerprint("no record for Jane Doe"));
+    ASSERT_TRUE(body["context"] == nlohmann::json({{"error_code", "E42"}}));
+    ASSERT_TRUE(body["user"] == nlohmann::json({{"id", "u-1"}}));
+    ASSERT_TRUE(request_body(server).find("Jane") == std::string::npos);
+
+    forge_ops_tracker::reset_for_testing();
+}
+
+TEST(strict_privacy_a_performance_samples_transaction_name_keeps_a_route_and_strips_a_raw_path) {
+    Configuration config = performance_configuration(1);
+    config.strict_privacy = true;
+    forge_ops_tracker::PerformanceFlusher flusher(config, Client(config));
+    flusher.record("GET /patients/42", 10.0);
+    flusher.record("GET /patients/43", 30.0);
+    flusher.record("/patients/jane-doe-1961/chart?tab=2", 5.0);
+    flusher.record("OrdersController#create", 7.0);
+    flusher.record("GET /users/:id", 9.0);
+
+    ASSERT_TRUE(flusher.tally_for_testing("GET /patients/:id").count == 2);
+    ASSERT_TRUE(flusher.tally_for_testing("/patients/:id/chart").count == 1);
+    ASSERT_TRUE(flusher.tally_for_testing("OrdersController#create").count == 1);
+    ASSERT_TRUE(flusher.tally_for_testing("GET /users/:id").count == 1);
+    ASSERT_TRUE(flusher.tally_for_testing("GET /patients/42").count == 0);
+    flusher.discard();
+
+    Configuration off_config = performance_configuration(1);
+    forge_ops_tracker::PerformanceFlusher off(off_config, Client(off_config));
+    off.record("GET /patients/42", 10.0);
+    off.record("/patients/jane-doe-1961/chart?tab=2", 5.0);
+    ASSERT_TRUE(off.tally_for_testing("GET /patients/42").count == 1);
+    ASSERT_TRUE(off.tally_for_testing("/patients/jane-doe-1961/chart?tab=2").count == 1);
+    off.discard();
+}
+
+TEST(strict_privacy_transaction_name_leaves_a_blank_name_alone) {
+    ASSERT_TRUE(forge_ops_tracker::strict_privacy::transaction_name("") == "");
+    ASSERT_TRUE(forge_ops_tracker::strict_privacy::transaction_name("  ") == "  ");
+    ASSERT_TRUE(forge_ops_tracker::strict_privacy::transaction_name("patients#show") == "patients#show");
+    ASSERT_TRUE(forge_ops_tracker::strict_privacy::transaction_name("PUT /orders/17/items") == "PUT /orders/:id/items");
+}
+
 int main(int argc, char** argv) {
     g_self_path = argv[0];
     if (argc == 4 && std::string(argv[1]) == "--terminate-child") {
@@ -3142,6 +3401,19 @@ int main(int argc, char** argv) {
     RUN(changes_record_change_is_a_no_op_when_reporting_is_not_enabled_for_this_environment);
     RUN(changes_record_change_never_throws_on_a_403_or_an_unreachable_host_or_invalid_utf8);
     RUN(changes_uri_swaps_the_trailing_events_segment);
+
+    RUN(strict_privacy_every_fingerprint_vector_normalizes_and_hashes_exactly);
+    RUN(strict_privacy_every_path_vector_strips_ids);
+    RUN(strict_privacy_every_span_name_vector_keeps_only_the_method_and_host);
+    RUN(strict_privacy_sha256_matches_the_published_digests);
+    RUN(strict_privacy_is_off_by_default_and_reads_the_environment_with_code_winning);
+    RUN(strict_privacy_an_event_carries_only_structured_facts_and_a_fingerprint);
+    RUN(strict_privacy_an_event_with_nothing_allowed_has_no_context_and_no_user_without_an_id);
+    RUN(strict_privacy_off_leaves_an_event_exactly_as_before);
+    RUN(strict_privacy_spans_name_outbound_calls_by_host_and_keep_only_database_data);
+    RUN(strict_privacy_records_no_breadcrumbs_and_sends_a_strict_event_through_the_full_stack);
+    RUN(strict_privacy_a_performance_samples_transaction_name_keeps_a_route_and_strips_a_raw_path);
+    RUN(strict_privacy_transaction_name_leaves_a_blank_name_alone);
 
     std::printf("\n%d run, %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed == 0 ? 0 : 1;

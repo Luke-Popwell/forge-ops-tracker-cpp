@@ -15,6 +15,7 @@
 
 #include "forge_ops_tracker/pii_scrubber.hpp"
 #include "forge_ops_tracker/sql_statement.hpp"
+#include "forge_ops_tracker/strict_privacy.hpp"
 
 namespace forge_ops_tracker {
 
@@ -119,7 +120,7 @@ nlohmann::json EventBuilder::build(const std::exception_ptr& exception_ptr, cons
     };
     // Omitted entirely (never sent as an empty array) when there's nothing to report; part of the
     // payload scrub_payload sees, so message/data get scrubbed with everything else.
-    if (!breadcrumbs.empty()) {
+    if (!breadcrumbs.empty() && !configuration_.strict_privacy) {
         payload["breadcrumbs"] = breadcrumbs;
     }
     attach_sql(payload, raw_statement);
@@ -138,6 +139,12 @@ nlohmann::json EventBuilder::build(const std::exception_ptr& exception_ptr, cons
     // trace's spans and, through traceparent, to errors in the other services it touched.
     if (trace_id) {
         built["trace_id"] = *trace_id;
+    }
+    // Last, over everything above: the message is fingerprinted as it would otherwise have gone
+    // out (after scrubbing), the same text the server would fingerprint from an SDK without strict
+    // privacy, and then dropped along with every other free-text field. See strict_privacy.hpp.
+    if (configuration_.strict_privacy) {
+        return strict_privacy::event(std::move(built), configuration_.privacy_allowed_fields);
     }
     return built;
 }

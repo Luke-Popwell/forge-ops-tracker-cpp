@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include "forge_ops_tracker/histogram_bucketer.hpp"
+#include "forge_ops_tracker/strict_privacy.hpp"
 
 namespace forge_ops_tracker {
 
@@ -54,7 +55,9 @@ void PerformanceFlusher::record(const std::string& transaction_name, double dura
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        Bucket& bucket = buckets_[transaction_name];
+        // Under strict privacy a raw path ("GET /patients/42") is reduced here, as it's recorded, so
+        // every id's calls share one bucket and the path never reaches the wire.
+        Bucket& bucket = buckets_[configuration_.strict_privacy ? strict_privacy::transaction_name(transaction_name) : transaction_name];
         bucket.count++;
         bucket.duration_sum_ms += duration_ms;
         if (duration_ms > bucket.max_duration_ms) {

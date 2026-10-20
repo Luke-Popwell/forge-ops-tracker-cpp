@@ -131,6 +131,27 @@ public:
     /** Whether an outgoing call to `host` should carry a traceparent header; case-insensitive, since hostnames are. */
     bool should_propagate_trace(const std::optional<std::string>& host) const;
 
+    /**
+     * Strict privacy, for an app that can't let personal or health data leave its own servers: only
+     * structured facts about an error are sent (its class, its backtrace frames, release,
+     * environment, server, trace id), never free text. The message is replaced by
+     * message_fingerprint, a one-way hash computed here so grouping still works; context and tags
+     * keep only the keys in privacy_allowed_fields, with plain values; the user is sent as its id
+     * only; breadcrumbs are neither recorded nor sent; the SQL statement and source context are never
+     * sent; an http span is named by its method and host only, and every span's data keeps only
+     * db.statement (masked) and db.system. Performance samples, metrics and changes are unchanged.
+     * See strict_privacy.hpp. Off by default; starts as FORGE_OPS_STRICT_PRIVACY=true when that is
+     * set, and a value set here in code wins over it.
+     */
+    bool strict_privacy = default_strict_privacy();
+
+    /**
+     * Context and tag keys strict privacy still sends (your own error codes, say), when their value
+     * is a string, number or boolean. Empty by default; starts as FORGE_OPS_PRIVACY_ALLOWED_FIELDS
+     * (comma separated, "error_code,feature") when that is set. Ignored with strict_privacy off.
+     */
+    std::vector<std::string> privacy_allowed_fields = default_privacy_allowed_fields();
+
     std::function<void(const std::string&)> logger;
 
     std::optional<std::string> api_key() const;
@@ -161,6 +182,12 @@ public:
 
     /** What `environment` starts as: FORGE_OPS_ENVIRONMENT when set and not blank, else "production". */
     static std::string default_environment();
+
+    /** What `strict_privacy` starts as: true when FORGE_OPS_STRICT_PRIVACY is "true" (any case), else false. */
+    static bool default_strict_privacy();
+
+    /** What `privacy_allowed_fields` starts as: FORGE_OPS_PRIVACY_ALLOWED_FIELDS split on commas, each name trimmed, blanks dropped. */
+    static std::vector<std::string> default_privacy_allowed_fields();
 };
 
 } // namespace forge_ops_tracker

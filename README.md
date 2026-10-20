@@ -20,7 +20,7 @@ include(FetchContent)
 FetchContent_Declare(
   forge_ops_tracker
   GIT_REPOSITORY https://github.com/Luke-Popwell/forge-ops-tracker-cpp.git
-  GIT_TAG v0.10.0
+  GIT_TAG v0.11.0
 )
 FetchContent_MakeAvailable(forge_ops_tracker)
 target_link_libraries(your_app PRIVATE forge_ops_tracker)
@@ -546,6 +546,53 @@ earlier layer, not the only one. Deliberately does *not* support `Project#additi
 scrubbed, since redacting it would defeat the whole point of identifying users in the first place.
 
 To disable it: `config.scrub_pii = false;`
+
+## Strict privacy
+
+For an app that can't let personal or health data leave its own servers. With strict privacy on,
+this client sends only structured facts about an error, never free text that could hold a name, an
+email or anything else a person typed:
+
+```cpp
+forge_ops_tracker::init([](forge_ops_tracker::Configuration& config) {
+    config.dsn = "https://<api_key>@getforgeops.net/api/v1/events";
+    config.strict_privacy = true;
+    config.privacy_allowed_fields = {"error_code", "feature"};
+});
+```
+
+- The exception message is not sent. `message_fingerprint` goes instead: 32 hex characters, a
+  one-way hash of the message (after PII scrubbing, when that's on) with its numbers, hex object
+  ids and UUIDs taken out, computed in this process, so errors that differ only in ids still group
+  together and nothing about the text can be read back from it.
+- `context` and `tags` keep only the top-level keys listed in `privacy_allowed_fields`, and only
+  when the value is a string, number or boolean. Left out entirely when nothing is left.
+- The user is sent as its `id` only, as a string; never `email` or `username`. No id, no user.
+- Breadcrumbs are neither recorded nor sent.
+- The SQL statement is never sent, even with `capture_sql_statement` on. `sql_objects` (table,
+  view and procedure names) still is.
+- No source context (this client never sends any anyway: see "Source context" above).
+- Span names are read by hand, never with a URL parser. An `http` span is named by its method and
+  host only (`GET api.example.com`, with no scheme, credentials, port, path or query). A span named
+  by a path or by a method and a path, such as a trace's root `GET /patients/42/notes`, has every
+  segment holding a digit, or longer than 40 characters, replaced by `:id`
+  (`GET /patients/:id/notes`), with no query or fragment. Any other name
+  (`OrdersController#create`) is kept. Every span's data keeps only `db.statement` (already masked)
+  and `db.system`.
+- A performance sample's transaction name follows the same rule: a route (`GET /users/:id`) or an
+  action is kept, a raw path (`GET /patients/42`) has its ids replaced, so those calls share one
+  sample.
+- Kept exactly as without it: the exception class, backtrace frames, `occurred_at`, environment,
+  release, server name and trace id. Performance samples (apart from their transaction name),
+  metrics and changes are unchanged: they're already counts and timings.
+
+Both options can come from the environment too: `FORGE_OPS_STRICT_PRIVACY=true` turns it on and
+`FORGE_OPS_PRIVACY_ALLOWED_FIELDS=error_code,feature` (comma separated) lists the allowed fields.
+They are what the two options start as, so a value you set in code wins. Both default off and empty.
+
+ForgeOps applies the same rules on arrival when the project's own Strict privacy setting is on, so
+an app with strict privacy off in this client still can't get text stored for that project. This
+client's setting is what keeps the text from leaving your process at all.
 
 ## Database errors
 

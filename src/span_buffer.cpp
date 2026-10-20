@@ -8,6 +8,7 @@
 #include <fstream>
 
 #include "forge_ops_tracker/sql_statement.hpp"
+#include "forge_ops_tracker/strict_privacy.hpp"
 
 namespace forge_ops_tracker {
 
@@ -88,16 +89,20 @@ void SpanBuffer::record(const std::string& id, const std::string& parent, const 
 }
 
 nlohmann::json SpanBuffer::build(const std::string& id, const std::optional<std::string>& parent, const std::string& name, const std::string& kind, std::chrono::system_clock::time_point started_at, double duration_ms, const nlohmann::json& data) const {
+    // Strict privacy: an outbound call is named by its method and host only, a name made of a method
+    // and a raw path ("GET /patients/42", a root span included) gets its ids stripped, and the data
+    // keeps only the masked statement and the database system. See strict_privacy.hpp.
+    const bool strict = configuration_.strict_privacy;
     nlohmann::json span = {
         {"span_id", id},
         {"parent_span_id", parent ? nlohmann::json(*parent) : nlohmann::json(nullptr)},
-        {"name", name},
+        {"name", strict ? strict_privacy::span_name(name) : name},
         {"kind", normalize_kind(kind)},
         {"started_at", format_timestamp(started_at)},
         {"duration_ms", std::round(duration_ms * 100.0) / 100.0},
         {"environment", configuration_.environment},
         {"release", configuration_.release ? nlohmann::json(*configuration_.release) : nlohmann::json(nullptr)},
-        {"data", span_data(kind, data)},
+        {"data", strict ? strict_privacy::span_data(span_data(kind, data)) : span_data(kind, data)},
     };
     return span;
 }
