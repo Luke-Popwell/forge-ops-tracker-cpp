@@ -2991,11 +2991,11 @@ TEST(strict_privacy_every_fingerprint_vector_normalizes_and_hashes_exactly) {
     }
 }
 
-TEST(strict_privacy_every_path_vector_strips_ids) {
+TEST(strict_privacy_every_path_vector_keeps_a_route_template_and_only_a_raw_paths_first_segment) {
     nlohmann::json vectors = strict_privacy_vectors()["path"];
     ASSERT_TRUE(!vectors.empty());
     for (const auto& vector : vectors) {
-        if (forge_ops_tracker::strict_privacy::path_without_ids(vector["path"].get<std::string>()) != vector["strict"].get<std::string>()) {
+        if (forge_ops_tracker::strict_privacy::strict_path(vector["path"].get<std::string>()) != vector["strict"].get<std::string>()) {
             std::printf("  mismatch for %s\n", vector.dump().c_str());
             g_current_test_failed = true;
         }
@@ -3150,7 +3150,7 @@ TEST(strict_privacy_spans_name_outbound_calls_by_host_and_keep_only_database_dat
 
     auto trace = buffer.finish("GET /patients/42/notes", at, 1500.0);
     ASSERT_TRUE(trace.has_value());
-    ASSERT_TRUE(!span_named(*trace, "GET /patients/:id/notes").is_null());
+    ASSERT_TRUE(!span_named(*trace, "GET /patients/:path").is_null());
     auto http = span_named(*trace, "GET api.example.com");
     ASSERT_TRUE(http["data"].is_object() && http["data"].empty());
     auto database = span_named(*trace, "SELECT patients");
@@ -3193,7 +3193,7 @@ TEST(strict_privacy_records_no_breadcrumbs_and_sends_a_strict_event_through_the_
     forge_ops_tracker::reset_for_testing();
 }
 
-TEST(strict_privacy_a_performance_samples_transaction_name_keeps_a_route_and_strips_a_raw_path) {
+TEST(strict_privacy_a_performance_samples_transaction_name_keeps_a_route_and_cuts_a_raw_path_to_its_first_segment) {
     Configuration config = performance_configuration(1);
     config.strict_privacy = true;
     forge_ops_tracker::PerformanceFlusher flusher(config, Client(config));
@@ -3203,8 +3203,8 @@ TEST(strict_privacy_a_performance_samples_transaction_name_keeps_a_route_and_str
     flusher.record("OrdersController#create", 7.0);
     flusher.record("GET /users/:id", 9.0);
 
-    ASSERT_TRUE(flusher.tally_for_testing("GET /patients/:id").count == 2);
-    ASSERT_TRUE(flusher.tally_for_testing("/patients/:id/chart").count == 1);
+    ASSERT_TRUE(flusher.tally_for_testing("GET /patients/:path").count == 2);
+    ASSERT_TRUE(flusher.tally_for_testing("/patients/:path").count == 1);
     ASSERT_TRUE(flusher.tally_for_testing("OrdersController#create").count == 1);
     ASSERT_TRUE(flusher.tally_for_testing("GET /users/:id").count == 1);
     ASSERT_TRUE(flusher.tally_for_testing("GET /patients/42").count == 0);
@@ -3219,11 +3219,17 @@ TEST(strict_privacy_a_performance_samples_transaction_name_keeps_a_route_and_str
     off.discard();
 }
 
+// The old name still builds and still gives the same answer.
+TEST(strict_privacy_path_without_ids_is_another_name_for_strict_path) {
+    ASSERT_TRUE(forge_ops_tracker::strict_privacy::path_without_ids("/patients/jane-doe/12") == "/patients/:path");
+}
+
 TEST(strict_privacy_transaction_name_leaves_a_blank_name_alone) {
     ASSERT_TRUE(forge_ops_tracker::strict_privacy::transaction_name("") == "");
     ASSERT_TRUE(forge_ops_tracker::strict_privacy::transaction_name("  ") == "  ");
     ASSERT_TRUE(forge_ops_tracker::strict_privacy::transaction_name("patients#show") == "patients#show");
-    ASSERT_TRUE(forge_ops_tracker::strict_privacy::transaction_name("PUT /orders/17/items") == "PUT /orders/:id/items");
+    ASSERT_TRUE(forge_ops_tracker::strict_privacy::transaction_name("PUT /orders/17/items") == "PUT /orders/:path");
+    ASSERT_TRUE(forge_ops_tracker::strict_privacy::transaction_name("PUT /orders/:id/items") == "PUT /orders/:id/items");
 }
 
 int main(int argc, char** argv) {
@@ -3403,7 +3409,8 @@ int main(int argc, char** argv) {
     RUN(changes_uri_swaps_the_trailing_events_segment);
 
     RUN(strict_privacy_every_fingerprint_vector_normalizes_and_hashes_exactly);
-    RUN(strict_privacy_every_path_vector_strips_ids);
+    RUN(strict_privacy_every_path_vector_keeps_a_route_template_and_only_a_raw_paths_first_segment);
+    RUN(strict_privacy_path_without_ids_is_another_name_for_strict_path);
     RUN(strict_privacy_every_span_name_vector_keeps_only_the_method_and_host);
     RUN(strict_privacy_sha256_matches_the_published_digests);
     RUN(strict_privacy_is_off_by_default_and_reads_the_environment_with_code_winning);
@@ -3412,7 +3419,7 @@ int main(int argc, char** argv) {
     RUN(strict_privacy_off_leaves_an_event_exactly_as_before);
     RUN(strict_privacy_spans_name_outbound_calls_by_host_and_keep_only_database_data);
     RUN(strict_privacy_records_no_breadcrumbs_and_sends_a_strict_event_through_the_full_stack);
-    RUN(strict_privacy_a_performance_samples_transaction_name_keeps_a_route_and_strips_a_raw_path);
+    RUN(strict_privacy_a_performance_samples_transaction_name_keeps_a_route_and_cuts_a_raw_path_to_its_first_segment);
     RUN(strict_privacy_transaction_name_leaves_a_blank_name_alone);
 
     std::printf("\n%d run, %d failed\n", g_tests_run, g_tests_failed);

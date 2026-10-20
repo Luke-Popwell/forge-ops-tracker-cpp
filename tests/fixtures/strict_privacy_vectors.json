@@ -117,7 +117,7 @@
     },
     {
       "name": "GET /patients/42/notes",
-      "strict": "GET /patients/:id/notes"
+      "strict": "GET /patients/:path"
     },
     {
       "name": "DELETE http://10.0.0.5:8080/x/9",
@@ -133,11 +133,11 @@
     },
     {
       "name": "/patients/42",
-      "strict": "/patients/:id"
+      "strict": "/patients/:path"
     },
     {
       "name": "/patients/jane-doe-1961/chart?tab=2",
-      "strict": "/patients/:id/chart"
+      "strict": "/patients/:path"
     },
     {
       "name": "GET https://api.example.com/pat<ients/jane",
@@ -157,7 +157,7 @@
     },
     {
       "name": "PUT /orders/17/items",
-      "strict": "PUT /orders/:id/items"
+      "strict": "PUT /orders/:path"
     },
     {
       "name": "patients#show",
@@ -171,7 +171,7 @@
   "path": [
     {
       "path": "/patients/42/notes?q=jane",
-      "strict": "/patients/:id/notes"
+      "strict": "/patients/:path"
     },
     {
       "path": "/",
@@ -187,11 +187,81 @@
     },
     {
       "path": "/a/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/b",
-      "strict": "/a/:id/b"
+      "strict": "/a/:path"
     },
     {
       "path": "/orders/abc-123#top",
-      "strict": "/orders/:id"
+      "strict": "/orders/:path"
+    },
+    {
+      "path": "/patients/jane-doe/12",
+      "strict": "/patients/:path"
+    },
+    {
+      "path": "/patients/janedoe",
+      "strict": "/patients/:path"
+    },
+    {
+      "path": "/42/edit",
+      "strict": "/:id/:path"
+    },
+    {
+      "path": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "strict": "/:id"
+    },
+    {
+      "path": "//double//slash",
+      "strict": "/double/:path"
+    },
+    {
+      "path": "relative/path/x",
+      "strict": "relative/:path"
+    },
+    {
+      "path": "/patients/:id/notes",
+      "strict": "/patients/:id/notes"
+    },
+    {
+      "path": "/patients/{id}",
+      "strict": "/patients/{id}"
+    },
+    {
+      "path": "users/<int:id>/",
+      "strict": "users/<int:id>/"
+    },
+    {
+      "path": "/files/*path",
+      "strict": "/files/*path"
+    },
+    {
+      "path": "/posts/[slug]?x=1",
+      "strict": "/posts/[slug]"
+    },
+    {
+      "path": "/api/v1/orders/:id",
+      "strict": "/api/v1/orders/:id"
+    }
+  ],
+  "page_url": [
+    {
+      "url": "https://clinic.example.com/patients/jane-doe-1961/chart?tab=2",
+      "strict": "https://clinic.example.com/patients/:path"
+    },
+    {
+      "url": "http://user:pw@localhost:3000/a/b",
+      "strict": "http://localhost/a/:path"
+    },
+    {
+      "url": "https://shop.example.com/",
+      "strict": "https://shop.example.com/"
+    },
+    {
+      "url": "https://shop.example.com",
+      "strict": "https://shop.example.com/"
+    },
+    {
+      "url": "/relative/page/7",
+      "strict": "/relative/:path"
     }
   ]
 }

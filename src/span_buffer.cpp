@@ -89,8 +89,9 @@ void SpanBuffer::record(const std::string& id, const std::string& parent, const 
 }
 
 nlohmann::json SpanBuffer::build(const std::string& id, const std::optional<std::string>& parent, const std::string& name, const std::string& kind, std::chrono::system_clock::time_point started_at, double duration_ms, const nlohmann::json& data) const {
-    // Strict privacy: an outbound call is named by its method and host only, a name made of a method
-    // and a raw path ("GET /patients/42", a root span included) gets its ids stripped, and the data
+    // Strict privacy: an outbound call is named by its method and host only, a raw path in a name
+    // ("GET /patients/42/notes", a root span included) keeps only its first segment, a route
+    // template is kept, and the data
     // keeps only the masked statement and the database system. See strict_privacy.hpp.
     const bool strict = configuration_.strict_privacy;
     nlohmann::json span = {

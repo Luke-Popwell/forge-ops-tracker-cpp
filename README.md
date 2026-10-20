@@ -20,7 +20,7 @@ include(FetchContent)
 FetchContent_Declare(
   forge_ops_tracker
   GIT_REPOSITORY https://github.com/Luke-Popwell/forge-ops-tracker-cpp.git
-  GIT_TAG v0.11.0
+  GIT_TAG v0.12.0
 )
 FetchContent_MakeAvailable(forge_ops_tracker)
 target_link_libraries(your_app PRIVATE forge_ops_tracker)
@@ -574,14 +574,15 @@ forge_ops_tracker::init([](forge_ops_tracker::Configuration& config) {
 - No source context (this client never sends any anyway: see "Source context" above).
 - Span names are read by hand, never with a URL parser. An `http` span is named by its method and
   host only (`GET api.example.com`, with no scheme, credentials, port, path or query). A span named
-  by a path or by a method and a path, such as a trace's root `GET /patients/42/notes`, has every
-  segment holding a digit, or longer than 40 characters, replaced by `:id`
-  (`GET /patients/:id/notes`), with no query or fragment. Any other name
+  by a path or by a method and a path keeps a route template as it is (any segment like `:id`,
+  `{id}`, `<int:id>`, `[slug]` or `*path`: `GET /patients/:id/notes` stays), while a raw path keeps
+  only its first segment, so a trace's root `GET /patients/jane-doe/12` is sent as
+  `GET /patients/:path` (and `/42/edit` as `/:id/:path`), with no query or fragment. Any other name
   (`OrdersController#create`) is kept. Every span's data keeps only `db.statement` (already masked)
   and `db.system`.
 - A performance sample's transaction name follows the same rule: a route (`GET /users/:id`) or an
-  action is kept, a raw path (`GET /patients/42`) has its ids replaced, so those calls share one
-  sample.
+  action is kept, a raw path (`GET /patients/42`) is cut to its first segment
+  (`GET /patients/:path`), so those calls share one sample.
 - Kept exactly as without it: the exception class, backtrace frames, `occurred_at`, environment,
   release, server name and trace id. Performance samples (apart from their transaction name),
   metrics and changes are unchanged: they're already counts and timings.

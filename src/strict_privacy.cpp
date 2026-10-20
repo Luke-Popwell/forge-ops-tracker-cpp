@@ -283,7 +283,27 @@ std::string message_fingerprint(const std::string& message) {
     return sha256_hex(normalize_message(message)).substr(0, kFingerprintLength);
 }
 
-std::string path_without_ids(const std::string& path) {
+namespace {
+
+// A route parameter segment: ":id", "{id}", "<int:id>", "[slug]" or "*path". The parameter needs a
+// name (except after "*"), and none of it may be a newline, the same as the server's ".".
+bool is_route_parameter(const std::string& segment) {
+    if (segment.find('\n') != std::string::npos) {
+        return false;
+    }
+    std::size_t n = segment.size();
+    if (n >= 1 && segment[0] == '*') {
+        return true;
+    }
+    if (n >= 2 && segment[0] == ':') {
+        return true;
+    }
+    return n >= 3 && ((segment[0] == '{' && segment[n - 1] == '}') || (segment[0] == '<' && segment[n - 1] == '>') || (segment[0] == '[' && segment[n - 1] == ']'));
+}
+
+}  // namespace
+
+std::string strict_path(const std::string& path) {
     std::string without_query = path.substr(0, path.find_first_of("?#"));
 
     std::vector<std::string> segments;
@@ -296,23 +316,33 @@ std::string path_without_ids(const std::string& path) {
         }
         start = slash + 1;
     }
-    // Ruby's String#split drops trailing empty segments, so "/" and "/a/" come out as "" and "/a".
-    while (!segments.empty() && segments.back().empty()) {
-        segments.pop_back();
+    // A route template is kept whole: its words are a developer's, its parameters placeholders.
+    if (std::any_of(segments.begin(), segments.end(), is_route_parameter)) {
+        return without_query;
     }
 
-    std::string joined;
-    for (std::size_t i = 0; i < segments.size(); i++) {
-        const std::string& segment = segments[i];
-        bool is_id = std::any_of(segment.begin(), segment.end(), is_ascii_digit) || character_count(segment) > kMaxSegmentLength;
-        joined += (i == 0 ? "" : "/") + (is_id ? std::string(":id") : segment);
+    // A raw path keeps only its first segment: anything after it can name a person.
+    segments.erase(std::remove(segments.begin(), segments.end(), std::string()), segments.end());
+    if (segments.empty()) {
+        return "/";
     }
-    return joined.empty() ? "/" : joined;
+    const std::string& first = segments.front();
+    bool is_id = std::any_of(first.begin(), first.end(), is_ascii_digit) || character_count(first) > kMaxSegmentLength;
+    std::string result = without_query[0] == '/' ? "/" : "";
+    result += is_id ? std::string(":id") : first;
+    if (segments.size() > 1) {
+        result += "/:path";
+    }
+    return result;
+}
+
+std::string path_without_ids(const std::string& path) {
+    return strict_path(path);
 }
 
 std::string span_name(const std::string& name) {
     if (!name.empty() && name[0] == '/') {
-        return path_without_ids(name);
+        return strict_path(name);
     }
     static const char* const methods[] = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"};
     for (const char* method : methods) {
@@ -334,10 +364,10 @@ std::string span_name(const std::string& name) {
         std::string target = name.substr(target_start, target_end - target_start);
 
         if (target[0] == '/') {
-            return upper + " " + path_without_ids(target);
+            return upper + " " + strict_path(target);
         }
         std::string host = host_of(target);
-        return upper + " " + (host.empty() ? path_without_ids(target) : host);
+        return upper + " " + (host.empty() ? strict_path(target) : host);
     }
     return name;
 }

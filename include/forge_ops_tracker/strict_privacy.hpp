@@ -38,15 +38,22 @@ std::string message_fingerprint(const std::string& message);
 std::string sha256_hex(const std::string& bytes);
 
 /**
- * A path with every segment that holds an ASCII digit, or is longer than 40 characters, replaced by
- * ":id", and no query or fragment: "/patients/42/notes?q=x" is "/patients/:id/notes". Empty is "/".
+ * A request or page path as strict privacy sends it, with no query or fragment. A route template
+ * (any segment that starts with ":" or "*", or is wrapped in {}, <> or []) is kept as it is:
+ * "/patients/:id/notes" stays. A raw path keeps only its first segment (":id" when that holds an
+ * ASCII digit or is longer than 40 characters), then "/:path" if there was more:
+ * "/patients/jane-doe/12" is "/patients/:path", "/42/edit" is "/:id/:path". No segments is "/".
  */
+std::string strict_path(const std::string& path);
+
+/** The name strict_path had before its rule changed: the same function, kept so existing code still builds. */
 std::string path_without_ids(const std::string& path);
 
 /**
- * A span's name with no path ids and no outbound address beyond its host, read by hand rather than
- * with a URL parser: a name starting with "/" is a path ("/patients/42" is "/patients/:id"); a
- * method followed by a path gets its ids stripped ("GET /patients/42" is "GET /patients/:id"); a
+ * A span's name with no raw path beyond its first segment and no outbound address beyond its host,
+ * read by hand rather than with a URL parser: a name starting with "/" goes through strict_path
+ * ("/patients/42" is "/patients/:path"); so does a method followed by a path ("GET /patients/42/notes"
+ * is "GET /patients/:path", "GET /patients/:id" stays); a
  * method followed by an address keeps only the host ("GET https://api.example.com/patients/42?x=1"
  * is "GET api.example.com"), which needs a scheme, a port, a dot or "localhost" to count as one, or
  * the whole target gets the path rule instead. Any other name ("OrdersController#create",
@@ -55,8 +62,8 @@ std::string path_without_ids(const std::string& path);
 std::string span_name(const std::string& name);
 
 /**
- * Which request something happened in: a route or a controller action is kept, a raw path has its
- * ids stripped, by span_name's rule. A blank name is returned unchanged.
+ * Which request something happened in: a route template or a controller action is kept, a raw
+ * path keeps only its first segment, by span_name's rule. A blank name is returned unchanged.
  */
 std::string transaction_name(const std::string& name);
 
