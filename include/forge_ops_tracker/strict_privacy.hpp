@@ -18,14 +18,18 @@ namespace forge_ops_tracker {
  * the exact results (see tests/fixtures).
  *
  * Grouping keeps working without the message: message_fingerprint is a one-way hash of the message
- * with its numbers and ids taken out, so two messages that differ only in ids hash the same.
+ * with its emails, quoted values, numbers and ids taken out, so two messages that differ only in
+ * those hash the same.
  */
 namespace strict_privacy {
 
 /**
- * The message with every "0x" plus 4 or more hex digits replaced by "0x", then every UUID that
- * isn't directly next to an ASCII word character ([A-Za-z0-9_]) by "<uuid>", then every run of
- * ASCII digits that isn't directly next to one by "<n>". A byte scanner rather than std::regex:
+ * The message with every email replaced by "<email>", then every double-quoted run and every
+ * single-quoted run (quotes included, never across a line break; a single quote only opens or
+ * closes one where no ASCII word character [A-Za-z0-9_] is directly outside it) by "<str>", then
+ * every "0x" plus 4 or more hex digits by "0x", then every UUID that isn't directly next to an
+ * ASCII word character by "<uuid>", then every run of ASCII digits that isn't directly next to one
+ * by "<n>". A byte scanner rather than std::regex:
  * "word character" is ASCII only here, so a UTF-8 byte of an accented letter or a digit in another
  * script is never one, whatever the regex engine's locale would say.
  */

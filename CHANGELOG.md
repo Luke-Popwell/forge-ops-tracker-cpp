@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.0 (2026-10-22)
+
+- Strict privacy: the message fingerprint now also replaces email addresses with `<email>` and quoted
+  values (`"..."`, and `'...'` when the quotes aren't part of a word) with `<str>`, before the existing
+  steps. `KeyError: 'Jane Doe'` and `KeyError: 'Bob Smith'` now group together, and no guessable value sits
+  behind the hash. Errors whose messages contain quotes or emails get new fingerprints once, so they open
+  new issues after upgrading.
+
 ## 0.12.1 (2026-10-22)
 
 - The README says what strict privacy does in its opening lines.

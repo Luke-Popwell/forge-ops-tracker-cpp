@@ -33,6 +33,100 @@ bool is_space(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
 }
 
+bool is_alpha(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+bool is_email_local(char c) {
+    return is_alpha(c) || is_ascii_digit(c) || c == '.' || c == '_' || c == '%' || c == '+' || c == '-';
+}
+
+bool is_email_domain(char c) {
+    return is_alpha(c) || is_ascii_digit(c) || c == '.' || c == '-';
+}
+
+// The length of the email [a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,} starting at `at`, or 0,
+// as a backtracking engine matches it. '@' isn't a local-part character, so the local part is the
+// whole run before it. The domain takes its whole run, then gives characters back until what's left
+// ends in "." plus 2 or more letters, and those letters take as many as they can. local_end is
+// where the local-part run stops: no start inside the run can match either, since each one reaches
+// the same '@' and the same domain.
+std::size_t email_at(const std::string& in, std::size_t at, std::size_t& local_end) {
+    std::size_t at_sign = at;
+    while (at_sign < in.size() && is_email_local(in[at_sign])) {
+        at_sign++;
+    }
+    local_end = at_sign;
+    if (at_sign == at || at_sign == in.size() || in[at_sign] != '@') {
+        return 0;
+    }
+    std::size_t domain_start = at_sign + 1;
+    std::size_t domain_end = domain_start;
+    while (domain_end < in.size() && is_email_domain(in[domain_end])) {
+        domain_end++;
+    }
+    for (std::size_t dot = domain_end; dot > domain_start + 1; dot--) {
+        std::size_t d = dot - 1;
+        if (in[d] != '.') {
+            continue;
+        }
+        std::size_t end = d + 1;
+        while (end < in.size() && is_alpha(in[end])) {
+            end++;
+        }
+        if (end - (d + 1) >= 2) {
+            return end - at;
+        }
+    }
+    return 0;
+}
+
+std::string replace_emails(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    std::size_t i = 0;
+    while (i < in.size()) {
+        std::size_t local_end = i;
+        std::size_t length = is_email_local(in[i]) ? email_at(in, i, local_end) : 0;
+        if (length > 0) {
+            out += "<email>";
+            i += length;
+            continue;
+        }
+        std::size_t next = std::max(local_end, i + 1);
+        out.append(in, i, next - i);
+        i = next;
+    }
+    return out;
+}
+
+// Each run of `quote`, then any bytes but `quote`, CR or LF, then `quote`, becomes "<str>". With
+// at_word_boundary, the opening quote can't directly follow an ASCII word character and the closing
+// one can't directly precede one; an opener whose closer fails that has no match, and the scan
+// moves on to the next byte.
+std::string replace_quoted(const std::string& in, char quote, bool at_word_boundary) {
+    std::string out;
+    out.reserve(in.size());
+    std::size_t i = 0;
+    while (i < in.size()) {
+        if (in[i] == quote && (!at_word_boundary || i == 0 || !is_word(in[i - 1]))) {
+            std::size_t end = i + 1;
+            while (end < in.size() && in[end] != quote && in[end] != '\r' && in[end] != '\n') {
+                end++;
+            }
+            if (end < in.size() && in[end] == quote &&
+                (!at_word_boundary || end + 1 == in.size() || !is_word(in[end + 1]))) {
+                out += "<str>";
+                i = end + 1;
+                continue;
+            }
+        }
+        out += in[i];
+        i++;
+    }
+    return out;
+}
+
 std::string replace_hex_object_ids(const std::string& in) {
     std::string out;
     out.reserve(in.size());
@@ -276,7 +370,8 @@ std::string sha256_hex(const std::string& bytes) {
 }
 
 std::string normalize_message(const std::string& message) {
-    return replace_numbers(replace_uuids(replace_hex_object_ids(message)));
+    std::string without_values = replace_quoted(replace_quoted(replace_emails(message), '"', false), '\'', true);
+    return replace_numbers(replace_uuids(replace_hex_object_ids(without_values)));
 }
 
 std::string message_fingerprint(const std::string& message) {
