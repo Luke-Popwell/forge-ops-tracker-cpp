@@ -3,6 +3,8 @@
 C++ error reporting client for [ForgeOps](https://getforgeops.net).
 Requires a POSIX platform (macOS, Linux): see "Platform" below. Targets C++17.
 
+> For health or personal data, turn on [strict privacy](#strict-privacy): the SDK then sends only structured facts about each error (its type, stack trace, release and route), never the message, a raw path, breadcrumbs, or context you haven't allowed.
+
 Built around a live delivery queue (Configuration, EventBuilder, DeliveryQueue, Reporter, Client)
 rather than a disk-backed crash store. C++ has real exceptions, so "catch it, build a payload, hand
 it to a background thread" is both possible and the shape this SDK takes: an exception is caught at
@@ -20,7 +22,7 @@ include(FetchContent)
 FetchContent_Declare(
   forge_ops_tracker
   GIT_REPOSITORY https://github.com/Luke-Popwell/forge-ops-tracker-cpp.git
-  GIT_TAG v0.12.0
+  GIT_TAG v0.12.1
 )
 FetchContent_MakeAvailable(forge_ops_tracker)
 target_link_libraries(your_app PRIVATE forge_ops_tracker)

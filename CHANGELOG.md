@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.1 (2026-10-22)
+
+- The README says what strict privacy does in its opening lines.
+
 ## 0.12.0 (2026-10-20)
 
 - **Behavior change under strict privacy: a raw request path keeps only its first segment.** A span name or performance transaction name holding a raw path is now sent as its first segment plus `/:path` (`/patients/jane-doe/12` is `/patients/:path`; a first segment with a digit, or over 40 characters, is `:id`), where before only segments with a digit were replaced, so a name slug like `jane-doe` went out. A route template (any segment like `:id`, `{id}`, `<int:id>`, `[slug]` or `*path`) is kept exactly as it is. New `strict_privacy::strict_path`; `strict_privacy::path_without_ids` is kept as another name for it. With strict privacy off, nothing changes.
