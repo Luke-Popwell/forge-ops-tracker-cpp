@@ -3002,6 +3002,40 @@ TEST(strict_privacy_every_path_vector_keeps_a_route_template_and_only_a_raw_path
     }
 }
 
+/* ---- PII scrubbing vectors ---------------------------------------------------------------------
+ * tests/fixtures/pii_scrubbing_vectors.json, a byte identical copy of sdks/pii_scrubbing_vectors.json,
+ * which the server's own scrubber generated (see sdks/PII_SCRUBBING.md). */
+
+static nlohmann::json pii_scrubbing_vectors() {
+    std::ifstream file(std::string(FORGE_OPS_TEST_FIXTURES_DIR) + "/pii_scrubbing_vectors.json");
+    return nlohmann::json::parse(file);
+}
+
+TEST(pii_every_scrubbing_string_vector_scrubs_exactly) {
+    nlohmann::json vectors = pii_scrubbing_vectors()["strings"];
+    ASSERT_TRUE(!vectors.empty());
+    for (const auto& vector : vectors) {
+        if (forge_ops_tracker::pii_scrubber::scrub_string(vector["input"].get<std::string>()) != vector["scrubbed"].get<std::string>()) {
+            std::printf("  mismatch for %s\n", vector.dump().c_str());
+            g_current_test_failed = true;
+        }
+    }
+}
+
+TEST(pii_every_scrubbing_key_vector_redacts_exactly) {
+    nlohmann::json vectors = pii_scrubbing_vectors()["keys"];
+    ASSERT_TRUE(!vectors.empty());
+    for (const auto& vector : vectors) {
+        std::string key = vector["key"].get<std::string>();
+        nlohmann::json scrubbed = forge_ops_tracker::pii_scrubber::scrub(nlohmann::json{{key, "x"}});
+        bool redacted = scrubbed[key] == forge_ops_tracker::pii_scrubber::kRedacted;
+        if (redacted != vector["redacted"].get<bool>()) {
+            std::printf("  mismatch for %s\n", vector.dump().c_str());
+            g_current_test_failed = true;
+        }
+    }
+}
+
 TEST(strict_privacy_every_span_name_vector_keeps_only_the_method_and_host) {
     nlohmann::json vectors = strict_privacy_vectors()["span_name"];
     ASSERT_TRUE(!vectors.empty());
@@ -3257,6 +3291,8 @@ int main(int argc, char** argv) {
     RUN(pii_sensitive_key_scrub_ignores_case_and_punctuation);
     RUN(pii_scrub_recurses_through_nested_objects_and_arrays);
     RUN(pii_scrub_null_under_sensitive_key_stays_null);
+    RUN(pii_every_scrubbing_string_vector_scrubs_exactly);
+    RUN(pii_every_scrubbing_key_vector_redacts_exactly);
 
     RUN(event_builder_basic_fields);
     RUN(event_builder_release_and_server_name_are_null_when_unset);
